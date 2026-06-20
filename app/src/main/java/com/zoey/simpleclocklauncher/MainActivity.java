@@ -4,6 +4,8 @@ import android.app.Activity;
 import android.app.Dialog;
 import android.content.ComponentName;
 import android.content.Intent;
+import android.net.Uri;
+import android.provider.Settings;
 import android.content.SharedPreferences;
 import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
@@ -57,7 +59,9 @@ import java.text.Collator;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.Locale;
 
 public class MainActivity extends Activity {
@@ -79,6 +83,10 @@ public class MainActivity extends Activity {
     private static final String PREF_TINT_OPACITY = "tint_opacity";
     private static final String PREF_SHADE_FIX = "shade_fix";
     private static final String PREF_FULLSCREEN_MODE = "fullscreen_mode";
+    private static final String PREF_CUSTOM_BACKGROUND_URI = "custom_background_uri";
+    private static final String PREF_HIDDEN_APPS = "hidden_apps";
+    private static final String PREF_DRAWER_ICON_SIZE_DP = "drawer_icon_size_dp";
+    private static final String PREF_DRAWER_LABEL_SIZE_SP = "drawer_label_size_sp";
     private static final String PREF_DRAWER_LOCK_ENABLED = "drawer_lock_enabled";
     private static final String PREF_DRAWER_PASS_HASH = "drawer_pass_hash";
     private static final String PREF_DRAWER_LOCKOUT_SECONDS = "drawer_lockout_seconds";
@@ -99,9 +107,11 @@ public class MainActivity extends Activity {
     private static final int DRAWER_LOCKOUT_AFTER_FAILS = 5;
     private static final String DEFAULT_CLOCK_FONT_KEY = "family:sans-serif-thin";
     private static final long SETTINGS_LONG_PRESS_MS = 1000L;
+    private static final int REQUEST_PICK_BACKGROUND = 2407;
 
     private FrameLayout root;
     private FrameLayout drawer;
+    private ImageView backgroundImageView;
     private GradientOverlayView gradientOverlayView;
     private DrawerBackgroundView drawerBackgroundView;
     private View notificationShadeTintView;
@@ -109,6 +119,7 @@ public class MainActivity extends Activity {
     private TextView drawerTitle;
     private TextView appCountView;
     private EditText searchBar;
+    private ScrollView appDrawerScrollView;
     private ClockFaceView clockFaceView;
 
     private SharedPreferences prefs;
@@ -128,6 +139,9 @@ public class MainActivity extends Activity {
     private int tintOpacity = DEFAULT_TINT_OPACITY;
     private boolean shadeFixEnabled = true;
     private boolean fullscreenMode = true;
+    private String customBackgroundUri = "";
+    private int drawerIconSizeDp = 0;
+    private int drawerLabelSizeSp = 0;
     private boolean drawerLockEnabled = false;
     private String drawerPassHash = "";
     private int drawerLockoutSeconds = DEFAULT_DRAWER_LOCKOUT_SECONDS;
@@ -140,6 +154,7 @@ public class MainActivity extends Activity {
     private final List<AppEntry> allApps = new ArrayList<>();
     private final List<ClockFontOption> availableFonts = new ArrayList<>();
     private final List<AppEntry> filteredApps = new ArrayList<>();
+    private final Set<String> hiddenAppKeys = new HashSet<>();
     private String currentSearch = "";
 
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -227,6 +242,23 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_PICK_BACKGROUND && resultCode == RESULT_OK && data != null && data.getData() != null) {
+            Uri uri = data.getData();
+            int flags = data.getFlags() & Intent.FLAG_GRANT_READ_URI_PERMISSION;
+            try {
+                getContentResolver().takePersistableUriPermission(uri, flags);
+            } catch (Exception ignored) {
+            }
+            customBackgroundUri = uri.toString();
+            saveSettings();
+            applyCustomBackground();
+            Toast.makeText(this, "Custom background set", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
         if (hasFocus) {
@@ -274,8 +306,14 @@ public class MainActivity extends Activity {
                     return true;
                 }
                 if (drawerVisible && mostlyVertical && dy > threshold) {
-                    closeDrawer(true);
-                    return true;
+                    // Do not treat normal app-list scrolling as a drawer-close gesture.
+                    // The drawer can still be closed with Back, or by swiping down from the header/top area.
+                    boolean startedInScrollableAppList = isPointInsideView(gestureStartX, gestureStartY, appDrawerScrollView);
+                    boolean startedNearDrawerHeader = gestureStartY < dp(118);
+                    if (!startedInScrollableAppList || startedNearDrawerHeader) {
+                        closeDrawer(true);
+                        return true;
+                    }
                 }
                 break;
             case MotionEvent.ACTION_CANCEL:
@@ -283,6 +321,22 @@ public class MainActivity extends Activity {
                 break;
         }
         return super.dispatchTouchEvent(event);
+    }
+
+    private boolean isPointInsideView(float rawX, float rawY, View view) {
+        if (view == null || view.getVisibility() != View.VISIBLE) {
+            return false;
+        }
+        int[] location = new int[2];
+        view.getLocationOnScreen(location);
+        int[] rootLocation = new int[2];
+        root.getLocationOnScreen(rootLocation);
+        float screenX = rawX + rootLocation[0];
+        float screenY = rawY + rootLocation[1];
+        return screenX >= location[0]
+                && screenX <= location[0] + view.getWidth()
+                && screenY >= location[1]
+                && screenY <= location[1] + view.getHeight();
     }
 
     private void beginSettingsLongPressWatch() {
@@ -318,6 +372,15 @@ public class MainActivity extends Activity {
         tintOpacity = clampInt(prefs.getInt(PREF_TINT_OPACITY, DEFAULT_TINT_OPACITY), 0, 100);
         shadeFixEnabled = prefs.getBoolean(PREF_SHADE_FIX, true);
         fullscreenMode = prefs.getBoolean(PREF_FULLSCREEN_MODE, true);
+        customBackgroundUri = prefs.getString(PREF_CUSTOM_BACKGROUND_URI, "");
+        if (customBackgroundUri == null) customBackgroundUri = "";
+        drawerIconSizeDp = clampInt(prefs.getInt(PREF_DRAWER_ICON_SIZE_DP, 0), 0, 96);
+        drawerLabelSizeSp = clampInt(prefs.getInt(PREF_DRAWER_LABEL_SIZE_SP, 0), 0, 24);
+        hiddenAppKeys.clear();
+        Set<String> savedHiddenApps = prefs.getStringSet(PREF_HIDDEN_APPS, null);
+        if (savedHiddenApps != null) {
+            hiddenAppKeys.addAll(savedHiddenApps);
+        }
         drawerLockEnabled = prefs.getBoolean(PREF_DRAWER_LOCK_ENABLED, false);
         drawerPassHash = prefs.getString(PREF_DRAWER_PASS_HASH, "");
         drawerLockoutSeconds = clampInt(prefs.getInt(PREF_DRAWER_LOCKOUT_SECONDS, DEFAULT_DRAWER_LOCKOUT_SECONDS), 0, 1800);
@@ -360,6 +423,10 @@ public class MainActivity extends Activity {
                 .putInt(PREF_TINT_OPACITY, tintOpacity)
                 .putBoolean(PREF_SHADE_FIX, shadeFixEnabled)
                 .putBoolean(PREF_FULLSCREEN_MODE, fullscreenMode)
+                .putString(PREF_CUSTOM_BACKGROUND_URI, customBackgroundUri == null ? "" : customBackgroundUri)
+                .putStringSet(PREF_HIDDEN_APPS, new HashSet<String>(hiddenAppKeys))
+                .putInt(PREF_DRAWER_ICON_SIZE_DP, drawerIconSizeDp)
+                .putInt(PREF_DRAWER_LABEL_SIZE_SP, drawerLabelSizeSp)
                 .putBoolean(PREF_DRAWER_LOCK_ENABLED, drawerLockEnabled)
                 .putString(PREF_DRAWER_PASS_HASH, drawerPassHash == null ? "" : drawerPassHash)
                 .putInt(PREF_DRAWER_LOCKOUT_SECONDS, drawerLockoutSeconds)
@@ -376,6 +443,15 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
         ));
+
+        backgroundImageView = new ImageView(this);
+        backgroundImageView.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        backgroundImageView.setBackgroundColor(Color.TRANSPARENT);
+        root.addView(backgroundImageView, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+        ));
+        applyCustomBackground();
 
         gradientOverlayView = new GradientOverlayView(this);
         gradientOverlayView.setTintSettings(tintColor, tintOpacity);
@@ -394,6 +470,7 @@ public class MainActivity extends Activity {
         clockFaceView = new ClockFaceView(this);
         clockFaceView.setClockSettings(analogClock, use24Hour);
         clockFaceView.setClockAppearance(clockTypeface, clockNumberColor, clockOutline, clockOutlineColor);
+        clockFaceView.setShadowTint(tintColor, tintOpacity);
         clockFaceView.setClockLayout(clockMarginVertical, clockMarginSide, clockOffsetX, clockOffsetY, clockAlignHorizontal, clockAlignVertical);
         clockFaceView.setLongClickable(false);
         root.addView(clockFaceView, new FrameLayout.LayoutParams(
@@ -506,6 +583,7 @@ public class MainActivity extends Activity {
         content.addView(searchBar, searchParams);
 
         ScrollView scrollView = new ScrollView(this);
+        appDrawerScrollView = scrollView;
         scrollView.setFillViewport(false);
         scrollView.setOverScrollMode(View.OVER_SCROLL_IF_CONTENT_SCROLLS);
         scrollView.setClipToPadding(false);
@@ -547,6 +625,9 @@ public class MainActivity extends Activity {
         if (drawerBackgroundView != null) {
             drawerBackgroundView.setTintSettings(tintColor, tintOpacity);
         }
+        if (clockFaceView != null) {
+            clockFaceView.setShadowTint(tintColor, tintOpacity);
+        }
         if (notificationShadeTintView != null) {
             // Do not draw a fake notification-shade tint strip inside the launcher.
             // On Android 15/16 that strip can show up under SystemUI as a second rectangular band.
@@ -581,6 +662,7 @@ public class MainActivity extends Activity {
         if (clockFaceView != null) {
             clockFaceView.setClockSettings(analogClock, use24Hour);
             clockFaceView.setClockAppearance(clockTypeface, clockNumberColor, clockOutline, clockOutlineColor);
+            clockFaceView.setShadowTint(tintColor, tintOpacity);
             clockFaceView.setClockLayout(clockMarginVertical, clockMarginSide, clockOffsetX, clockOffsetY, clockAlignHorizontal, clockAlignVertical);
             clockFaceView.setTime(hour, minute);
         }
@@ -678,7 +760,8 @@ public class MainActivity extends Activity {
                             label == null ? activityInfo.packageName : label.toString(),
                             icon,
                             launchIntent,
-                            activityInfo.packageName
+                            activityInfo.packageName,
+                            activityInfo.name
                     ));
                 }
 
@@ -705,10 +788,13 @@ public class MainActivity extends Activity {
     private void filterApps() {
         filteredApps.clear();
         String query = currentSearch == null ? "" : currentSearch.trim().toLowerCase(Locale.US);
-        if (query.length() == 0) {
-            filteredApps.addAll(allApps);
-        } else {
-            for (AppEntry app : allApps) {
+        for (AppEntry app : allApps) {
+            if (isAppHidden(app)) {
+                continue;
+            }
+            if (query.length() == 0) {
+                filteredApps.add(app);
+            } else {
                 String label = app.label == null ? "" : app.label.toLowerCase(Locale.US);
                 String packageName = app.packageName == null ? "" : app.packageName.toLowerCase(Locale.US);
                 if (label.contains(query) || packageName.contains(query)) {
@@ -738,15 +824,21 @@ public class MainActivity extends Activity {
         columns = Math.max(1, Math.min(8, columns));
         appGrid.setColumnCount(columns);
         int cellWidth = Math.max(1, width / columns);
-        int iconSize = Math.max(dp(22), Math.min(dp(48), cellWidth - dp(20)));
-        int labelTextSize = widthDp < 210f ? 9 : 11;
-        int cellHeight = Math.max(dp(76), Math.min(dp(116), iconSize + dp(widthDp < 210f ? 48 : 58)));
+        int iconSize = drawerIconSizeDp > 0
+                ? dp(drawerIconSizeDp)
+                : Math.max(dp(22), Math.min(dp(48), cellWidth - dp(20)));
+        iconSize = Math.max(dp(18), Math.min(dp(112), iconSize));
+        int labelTextSize = drawerLabelSizeSp > 0 ? drawerLabelSizeSp : (widthDp < 210f ? 9 : 11);
+        int cellHeight = Math.max(dp(58), Math.min(dp(150), iconSize + dp(widthDp < 210f ? 48 : 58)));
 
+        int hiddenCount = countHiddenApps();
+        int visibleTotal = Math.max(0, allApps.size() - hiddenCount);
         if (currentSearch != null && currentSearch.trim().length() > 0) {
-            appCountView.setText(apps.size() + " of " + allApps.size() + " apps");
+            appCountView.setText(apps.size() + " of " + visibleTotal + " apps");
         } else {
             String columnText = drawerColumns > 0 ? " • " + drawerColumns + " columns" : " • auto columns";
-            appCountView.setText(apps.size() + " installed apps" + columnText);
+            String hiddenText = hiddenCount > 0 ? " • " + hiddenCount + " hidden" : "";
+            appCountView.setText(apps.size() + " visible apps" + columnText + hiddenText);
         }
 
         if (apps.isEmpty()) {
@@ -773,11 +865,14 @@ public class MainActivity extends Activity {
             cell.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
-                    try {
-                        startActivity(app.launchIntent);
-                    } catch (Exception e) {
-                        Toast.makeText(MainActivity.this, "Could not open " + app.label, Toast.LENGTH_SHORT).show();
-                    }
+                    launchApp(app);
+                }
+            });
+            cell.setOnLongClickListener(new View.OnLongClickListener() {
+                @Override
+                public boolean onLongClick(View v) {
+                    showAppActionsDialog(app);
+                    return true;
                 }
             });
 
@@ -808,6 +903,184 @@ public class MainActivity extends Activity {
             params.height = cellHeight;
             params.setMargins(0, 0, 0, dp(2));
             appGrid.addView(cell, params);
+        }
+    }
+
+    private void launchApp(AppEntry app) {
+        if (app == null) return;
+        try {
+            startActivity(app.launchIntent);
+        } catch (Exception e) {
+            Toast.makeText(MainActivity.this, "Could not open " + app.label, Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private boolean isAppHidden(AppEntry app) {
+        return app != null && app.key != null && hiddenAppKeys.contains(app.key);
+    }
+
+    private int countHiddenApps() {
+        int count = 0;
+        for (AppEntry app : allApps) {
+            if (isAppHidden(app)) count++;
+        }
+        return count;
+    }
+
+    private void hideApp(AppEntry app) {
+        if (app == null || app.key == null) return;
+        hiddenAppKeys.add(app.key);
+        saveSettings();
+        filterApps();
+        Toast.makeText(this, app.label + " hidden", Toast.LENGTH_SHORT).show();
+    }
+
+    private void unhideApp(AppEntry app) {
+        if (app == null || app.key == null) return;
+        hiddenAppKeys.remove(app.key);
+        saveSettings();
+        filterApps();
+        Toast.makeText(this, app.label + " unhidden", Toast.LENGTH_SHORT).show();
+    }
+
+    private void showAppActionsDialog(final AppEntry app) {
+        if (app == null) return;
+        final Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(18), dp(16), dp(18), dp(14));
+        panel.setBackground(makePanelBackground());
+
+        TextView title = new TextView(this);
+        title.setText(app.label);
+        title.setTextColor(Color.rgb(250, 232, 236));
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        title.setSingleLine(false);
+        panel.addView(title, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        TextView pkg = new TextView(this);
+        pkg.setText(app.packageName);
+        pkg.setTextColor(Color.argb(145, 238, 220, 224));
+        pkg.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        LinearLayout.LayoutParams pkgParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        pkgParams.setMargins(0, dp(1), 0, dp(10));
+        panel.addView(pkg, pkgParams);
+
+        Button launchButton = makeActionButton("Launch");
+        Button infoButton = makeActionButton("App info");
+        Button uninstallButton = makeActionButton("Uninstall");
+        Button hideButton = makeActionButton("Hide from drawer");
+        Button cancelButton = makeActionButton("Cancel");
+        panel.addView(launchButton, actionButtonParams());
+        panel.addView(infoButton, actionButtonParams());
+        panel.addView(uninstallButton, actionButtonParams());
+        panel.addView(hideButton, actionButtonParams());
+        panel.addView(cancelButton, actionButtonParams());
+
+        launchButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                dialog.dismiss();
+                launchApp(app);
+            }
+        });
+        infoButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                dialog.dismiss();
+                openAppInfo(app);
+            }
+        });
+        uninstallButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                dialog.dismiss();
+                requestUninstall(app);
+            }
+        });
+        hideButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                dialog.dismiss();
+                hideApp(app);
+            }
+        });
+        cancelButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                dialog.dismiss();
+            }
+        });
+
+        dialog.setContentView(panel);
+        Window window = dialog.getWindow();
+        if (window != null) {
+            window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+        }
+        dialog.setOnDismissListener(new android.content.DialogInterface.OnDismissListener() {
+            @Override
+            public void onDismiss(android.content.DialogInterface dialogInterface) {
+                hideSystemUi();
+            }
+        });
+        dialog.show();
+        Window shownWindow = dialog.getWindow();
+        if (shownWindow != null) {
+            shownWindow.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            WindowManager.LayoutParams lp = new WindowManager.LayoutParams();
+            lp.copyFrom(shownWindow.getAttributes());
+            lp.width = Math.max(dp(170), Math.min(getResources().getDisplayMetrics().widthPixels - dp(24), dp(380)));
+            lp.height = WindowManager.LayoutParams.WRAP_CONTENT;
+            shownWindow.setAttributes(lp);
+        }
+    }
+
+    private Button makeActionButton(String text) {
+        Button button = new Button(this);
+        button.setText(text);
+        button.setTextColor(Color.rgb(60, 0, 10));
+        return button;
+    }
+
+    private LinearLayout.LayoutParams actionButtonParams() {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        params.setMargins(0, dp(2), 0, dp(2));
+        return params;
+    }
+
+    private void openAppInfo(AppEntry app) {
+        if (app == null || app.packageName == null) return;
+        try {
+            Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+            intent.setData(Uri.parse("package:" + app.packageName));
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(intent);
+        } catch (Exception e) {
+            Toast.makeText(this, "Could not open app info", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void requestUninstall(AppEntry app) {
+        if (app == null || app.packageName == null) return;
+        try {
+            Intent intent = new Intent(Intent.ACTION_DELETE);
+            intent.setData(Uri.parse("package:" + app.packageName));
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(intent);
+        } catch (Exception e) {
+            Toast.makeText(this, "Could not start uninstall", Toast.LENGTH_SHORT).show();
         }
     }
 
@@ -1442,6 +1715,46 @@ public class MainActivity extends Activity {
         fullscreenHintParams.setMargins(0, dp(1), 0, dp(10));
         panel.addView(fullscreenHint, fullscreenHintParams);
 
+        TextView backgroundLabel = makeSettingsLabel("Custom launcher background");
+        LinearLayout.LayoutParams backgroundLabelParams = smallLabelParams();
+        backgroundLabelParams.setMargins(0, dp(10), 0, dp(2));
+        panel.addView(backgroundLabel, backgroundLabelParams);
+
+        final TextView backgroundStatus = new TextView(this);
+        backgroundStatus.setText(customBackgroundUri == null || customBackgroundUri.trim().length() == 0 ? "Using Android wallpaper passthrough." : "Using custom image background.");
+        backgroundStatus.setTextColor(Color.argb(145, 238, 220, 224));
+        backgroundStatus.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        panel.addView(backgroundStatus, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        LinearLayout backgroundButtons = new LinearLayout(this);
+        backgroundButtons.setOrientation(LinearLayout.HORIZONTAL);
+        backgroundButtons.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
+        Button pickBackgroundButton = new Button(this);
+        pickBackgroundButton.setText("Pick image");
+        pickBackgroundButton.setTextColor(Color.rgb(60, 0, 10));
+        backgroundButtons.addView(pickBackgroundButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        Button clearBackgroundButton = new Button(this);
+        clearBackgroundButton.setText("Clear");
+        clearBackgroundButton.setTextColor(Color.rgb(60, 0, 10));
+        LinearLayout.LayoutParams clearBgParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        clearBgParams.setMargins(dp(8), 0, 0, 0);
+        backgroundButtons.addView(clearBackgroundButton, clearBgParams);
+        LinearLayout.LayoutParams bgButtonsParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        bgButtonsParams.setMargins(0, dp(3), 0, dp(10));
+        panel.addView(backgroundButtons, bgButtonsParams);
+
         final TextView marginVerticalLabel = makeSettingsLabel(makePercentLabel("Clock top/bottom margin", clockMarginVertical));
         LinearLayout.LayoutParams marginVerticalLabelParams = smallLabelParams();
         marginVerticalLabelParams.setMargins(0, dp(8), 0, dp(2));
@@ -1548,6 +1861,49 @@ public class MainActivity extends Activity {
         );
         hintParams.setMargins(0, dp(1), 0, dp(12));
         panel.addView(columnHint, hintParams);
+
+        final TextView iconSizeLabel = makeSettingsLabel(makeIconSizeLabel(drawerIconSizeDp));
+        LinearLayout.LayoutParams iconSizeLabelParams = smallLabelParams();
+        iconSizeLabelParams.setMargins(0, dp(8), 0, dp(2));
+        panel.addView(iconSizeLabel, iconSizeLabelParams);
+        final SeekBar iconSizeSeek = new SeekBar(this);
+        iconSizeSeek.setMax(80);
+        iconSizeSeek.setProgress(iconSizeToSeekProgress(drawerIconSizeDp));
+        panel.addView(iconSizeSeek, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        final TextView labelSizeLabel = makeSettingsLabel(makeLabelSizeLabel(drawerLabelSizeSp));
+        panel.addView(labelSizeLabel, smallLabelParams());
+        final SeekBar labelSizeSeek = new SeekBar(this);
+        labelSizeSeek.setMax(18);
+        labelSizeSeek.setProgress(labelSizeToSeekProgress(drawerLabelSizeSp));
+        panel.addView(labelSizeSeek, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        TextView drawerSizeHint = new TextView(this);
+        drawerSizeHint.setText("0 means auto. Larger icons may need fewer columns on tiny screens.");
+        drawerSizeHint.setTextColor(Color.argb(145, 238, 220, 224));
+        drawerSizeHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        LinearLayout.LayoutParams drawerSizeHintParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        drawerSizeHintParams.setMargins(0, dp(1), 0, dp(10));
+        panel.addView(drawerSizeHint, drawerSizeHintParams);
+
+        Button manageHiddenButton = new Button(this);
+        manageHiddenButton.setText("Manage hidden apps (" + countHiddenApps() + ")");
+        manageHiddenButton.setTextColor(Color.rgb(60, 0, 10));
+        LinearLayout.LayoutParams hiddenButtonParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        hiddenButtonParams.setMargins(0, dp(2), 0, dp(10));
+        panel.addView(manageHiddenButton, hiddenButtonParams);
 
         TextView lockSectionLabel = makeSettingsLabel("App drawer lock");
         LinearLayout.LayoutParams lockSectionParams = smallLabelParams();
@@ -1719,6 +2075,22 @@ public class MainActivity extends Activity {
             }
         });
 
+        pickBackgroundButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                dialog.dismiss();
+                pickCustomBackground();
+            }
+        });
+
+        clearBackgroundButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                clearCustomBackground();
+                backgroundStatus.setText("Using Android wallpaper passthrough.");
+            }
+        });
+
         marginVerticalSeek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
             public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
@@ -1835,6 +2207,49 @@ public class MainActivity extends Activity {
             }
         });
 
+        iconSizeSeek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                drawerIconSizeDp = seekProgressToIconSize(progress);
+                iconSizeLabel.setText(makeIconSizeLabel(drawerIconSizeDp));
+                saveSettings();
+                populateAppGrid(filteredApps);
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+            }
+        });
+
+        labelSizeSeek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                drawerLabelSizeSp = seekProgressToLabelSize(progress);
+                labelSizeLabel.setText(makeLabelSizeLabel(drawerLabelSizeSp));
+                saveSettings();
+                populateAppGrid(filteredApps);
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+            }
+        });
+
+        manageHiddenButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showHiddenAppsDialog(manageHiddenButton);
+            }
+        });
+
         drawerLockSwitch.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -1915,6 +2330,10 @@ public class MainActivity extends Activity {
                 tintOpacity = DEFAULT_TINT_OPACITY;
                 shadeFixEnabled = true;
                 fullscreenMode = true;
+                customBackgroundUri = "";
+                drawerIconSizeDp = 0;
+                drawerLabelSizeSp = 0;
+                applyCustomBackground();
                 analogSwitch.setChecked(false);
                 hourSwitch.setChecked(true);
                 updateClockModeControls(analogSwitch, hourSwitch);
@@ -1930,6 +2349,11 @@ public class MainActivity extends Activity {
                 tintOpacityLabel.setText(makePercentLabel("Background / shade tint opacity", tintOpacity));
                 shadeFixSwitch.setChecked(shadeFixEnabled);
                 fullscreenSwitch.setChecked(fullscreenMode);
+                backgroundStatus.setText("Using Android wallpaper passthrough.");
+                iconSizeSeek.setProgress(iconSizeToSeekProgress(drawerIconSizeDp));
+                labelSizeSeek.setProgress(labelSizeToSeekProgress(drawerLabelSizeSp));
+                iconSizeLabel.setText(makeIconSizeLabel(drawerIconSizeDp));
+                labelSizeLabel.setText(makeLabelSizeLabel(drawerLabelSizeSp));
                 marginVerticalSeek.setProgress(clockMarginVertical);
                 marginSideSeek.setProgress(clockMarginSide);
                 offsetXSeek.setProgress(clockOffsetX + 50);
@@ -1998,6 +2422,187 @@ public class MainActivity extends Activity {
             lp.copyFrom(shownWindow.getAttributes());
             lp.width = Math.max(dp(160), Math.min(getResources().getDisplayMetrics().widthPixels - dp(24), dp(430)));
             lp.height = Math.max(dp(160), Math.min(getResources().getDisplayMetrics().heightPixels - dp(28), dp(820)));
+            shownWindow.setAttributes(lp);
+        }
+    }
+
+    private void pickCustomBackground() {
+        try {
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            intent.setType("image/*");
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+            startActivityForResult(intent, REQUEST_PICK_BACKGROUND);
+        } catch (Exception e) {
+            Toast.makeText(this, "Could not open image picker", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void clearCustomBackground() {
+        customBackgroundUri = "";
+        saveSettings();
+        applyCustomBackground();
+        Toast.makeText(this, "Custom background cleared", Toast.LENGTH_SHORT).show();
+    }
+
+    private void applyCustomBackground() {
+        if (backgroundImageView == null) return;
+        if (customBackgroundUri == null || customBackgroundUri.trim().length() == 0) {
+            backgroundImageView.setImageDrawable(null);
+            backgroundImageView.setVisibility(View.GONE);
+            return;
+        }
+        try {
+            backgroundImageView.setVisibility(View.VISIBLE);
+            backgroundImageView.setImageURI(Uri.parse(customBackgroundUri));
+        } catch (Exception e) {
+            backgroundImageView.setImageDrawable(null);
+            backgroundImageView.setVisibility(View.GONE);
+            Toast.makeText(this, "Could not load custom background", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private String makeIconSizeLabel(int sizeDp) {
+        if (sizeDp <= 0) return "Drawer icon size: Auto";
+        return "Drawer icon size: " + sizeDp + "dp";
+    }
+
+    private String makeLabelSizeLabel(int sizeSp) {
+        if (sizeSp <= 0) return "Drawer label size: Auto";
+        return "Drawer label size: " + sizeSp + "sp";
+    }
+
+    private int iconSizeToSeekProgress(int sizeDp) {
+        if (sizeDp <= 0) return 0;
+        return clampInt(sizeDp - 16, 1, 80);
+    }
+
+    private int seekProgressToIconSize(int progress) {
+        if (progress <= 0) return 0;
+        return clampInt(progress + 16, 18, 96);
+    }
+
+    private int labelSizeToSeekProgress(int sizeSp) {
+        if (sizeSp <= 0) return 0;
+        return clampInt(sizeSp - 6, 1, 18);
+    }
+
+    private int seekProgressToLabelSize(int progress) {
+        if (progress <= 0) return 0;
+        return clampInt(progress + 6, 7, 24);
+    }
+
+    private void showHiddenAppsDialog(final Button sourceButton) {
+        final Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(false);
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(18), dp(16), dp(18), dp(14));
+        panel.setBackground(makePanelBackground());
+        scroll.addView(panel, new ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        TextView title = new TextView(this);
+        title.setText("Hidden apps");
+        title.setTextColor(Color.rgb(250, 232, 236));
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        panel.addView(title, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        int count = 0;
+        for (final AppEntry app : allApps) {
+            if (!isAppHidden(app)) continue;
+            count++;
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(0, dp(4), 0, dp(4));
+
+            ImageView icon = new ImageView(this);
+            icon.setImageDrawable(app.icon);
+            row.addView(icon, new LinearLayout.LayoutParams(dp(30), dp(30)));
+
+            TextView label = new TextView(this);
+            label.setText(app.label);
+            label.setTextColor(Color.rgb(242, 226, 230));
+            label.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+            label.setSingleLine(true);
+            label.setEllipsize(TextUtils.TruncateAt.END);
+            LinearLayout.LayoutParams labelParams = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+            labelParams.setMargins(dp(8), 0, dp(8), 0);
+            row.addView(label, labelParams);
+
+            Button unhide = new Button(this);
+            unhide.setText("Unhide");
+            unhide.setTextColor(Color.rgb(60, 0, 10));
+            row.addView(unhide, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+            ));
+            unhide.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    unhideApp(app);
+                    dialog.dismiss();
+                    showHiddenAppsDialog(sourceButton);
+                }
+            });
+            panel.addView(row, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+            ));
+        }
+
+        if (count == 0) {
+            TextView empty = new TextView(this);
+            empty.setText("No hidden apps yet. Long-press an app in the drawer and choose Hide from drawer.");
+            empty.setTextColor(Color.argb(145, 238, 220, 224));
+            empty.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+            LinearLayout.LayoutParams emptyParams = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+            );
+            emptyParams.setMargins(0, dp(6), 0, dp(10));
+            panel.addView(empty, emptyParams);
+        }
+
+        Button close = makeActionButton("Close");
+        panel.addView(close, actionButtonParams());
+        close.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                dialog.dismiss();
+            }
+        });
+
+        dialog.setContentView(scroll);
+        Window window = dialog.getWindow();
+        if (window != null) {
+            window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+        }
+        dialog.setOnDismissListener(new android.content.DialogInterface.OnDismissListener() {
+            @Override
+            public void onDismiss(android.content.DialogInterface dialogInterface) {
+                if (sourceButton != null) sourceButton.setText("Manage hidden apps (" + countHiddenApps() + ")");
+                hideSystemUi();
+            }
+        });
+        dialog.show();
+        Window shownWindow = dialog.getWindow();
+        if (shownWindow != null) {
+            shownWindow.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            WindowManager.LayoutParams lp = new WindowManager.LayoutParams();
+            lp.copyFrom(shownWindow.getAttributes());
+            lp.width = Math.max(dp(180), Math.min(getResources().getDisplayMetrics().widthPixels - dp(24), dp(430)));
+            lp.height = Math.max(dp(160), Math.min(getResources().getDisplayMetrics().heightPixels - dp(28), dp(650)));
             shownWindow.setAttributes(lp);
         }
     }
@@ -2318,12 +2923,16 @@ public class MainActivity extends Activity {
         final Drawable icon;
         final Intent launchIntent;
         final String packageName;
+        final String activityName;
+        final String key;
 
-        AppEntry(String label, Drawable icon, Intent launchIntent, String packageName) {
+        AppEntry(String label, Drawable icon, Intent launchIntent, String packageName, String activityName) {
             this.label = label;
             this.icon = icon;
             this.launchIntent = launchIntent;
             this.packageName = packageName;
+            this.activityName = activityName;
+            this.key = packageName + "/" + activityName;
         }
     }
 
@@ -2339,6 +2948,8 @@ public class MainActivity extends Activity {
         private int numberColor = Color.rgb(245, 232, 235);
         private boolean outlineEnabled = false;
         private int outlineColor = Color.rgb(70, 0, 10);
+        private int shadowTintColor = DEFAULT_TINT_COLOR;
+        private int shadowTintOpacity = DEFAULT_TINT_OPACITY;
         private int marginVerticalPercent = DEFAULT_CLOCK_MARGIN_VERTICAL;
         private int marginSidePercent = DEFAULT_CLOCK_MARGIN_SIDE;
         private int offsetXPercent = DEFAULT_CLOCK_OFFSET;
@@ -2357,11 +2968,11 @@ public class MainActivity extends Activity {
             paint.setColor(numberColor);
             paint.setTextAlign(Paint.Align.CENTER);
             paint.setTypeface(clockTypeface);
-            paint.setShadowLayer(18f, 0f, 4f, Color.argb(185, 70, 0, 10));
+            paint.setShadowLayer(18f, 0f, 4f, makeClockShadowColor());
             analogPaint.setColor(numberColor);
             analogPaint.setTextAlign(Paint.Align.CENTER);
             analogPaint.setTypeface(clockTypeface);
-            analogPaint.setShadowLayer(10f, 0f, 3f, Color.argb(185, 70, 0, 10));
+            analogPaint.setShadowLayer(10f, 0f, 3f, makeClockShadowColor());
         }
 
         void setClockSettings(boolean analog, boolean use24Hour) {
@@ -2389,6 +3000,18 @@ public class MainActivity extends Activity {
             analogPaint.setTypeface(typeface);
             if (changed) {
                 cachedTextSize = -1f;
+                invalidate();
+            }
+        }
+
+        void setShadowTint(int tintColor, int tintOpacity) {
+            tintOpacity = Math.max(0, Math.min(100, tintOpacity));
+            if (this.shadowTintColor != tintColor || this.shadowTintOpacity != tintOpacity) {
+                this.shadowTintColor = tintColor;
+                this.shadowTintOpacity = tintOpacity;
+                int shadowColor = makeClockShadowColor();
+                paint.setShadowLayer(18f, 0f, 4f, shadowColor);
+                analogPaint.setShadowLayer(10f, 0f, 3f, shadowColor);
                 invalidate();
             }
         }
@@ -2615,6 +3238,12 @@ public class MainActivity extends Activity {
                 return area.bottom - contentHeight;
             }
             return area.top + (area.height() - contentHeight) * 0.5f;
+        }
+
+        private int makeClockShadowColor() {
+            int opacity = Math.max(0, Math.min(100, shadowTintOpacity));
+            int alpha = Math.max(35, Math.min(205, Math.round(55f + opacity * 1.35f)));
+            return Color.argb(alpha, Color.red(shadowTintColor), Color.green(shadowTintColor), Color.blue(shadowTintColor));
         }
 
         private int applyAlpha(int color, int maxAlpha) {

@@ -1,0 +1,62 @@
+plugins {
+    id 'com.android.application'
+}
+
+def installedSdkPlatforms = {
+    def localProperties = new Properties()
+    def localFile = rootProject.file('local.properties')
+    if (localFile.exists()) {
+        localFile.withInputStream { localProperties.load(it) }
+    }
+
+    def sdkDirText = localProperties.getProperty('sdk.dir')
+    if (!sdkDirText) sdkDirText = System.getenv('ANDROID_HOME')
+    if (!sdkDirText) sdkDirText = System.getenv('ANDROID_SDK_ROOT')
+    if (!sdkDirText) sdkDirText = System.getenv('LOCALAPPDATA') ? System.getenv('LOCALAPPDATA') + File.separator + 'Android' + File.separator + 'Sdk' : null
+
+    if (!sdkDirText) return []
+
+    def platformsDir = new File(sdkDirText, 'platforms')
+    if (!platformsDir.exists()) return []
+
+    def found = []
+    platformsDir.eachDir { dir ->
+        def m = (dir.name =~ /^android-(\d+)$/)
+        if (m.matches() && new File(dir, 'android.jar').exists()) {
+            found << m.group(1).toInteger()
+        }
+    }
+    return found.sort()
+}
+
+def platforms = installedSdkPlatforms()
+def preferredPlatforms = platforms.findAll { it <= 35 }
+def detectedCompileSdk = preferredPlatforms ? preferredPlatforms.max() : (platforms ? platforms.max() : 35)
+def detectedTargetSdk = Math.min(detectedCompileSdk, 35)
+
+println "SimpleClockLauncher: installed SDKs ${platforms}; using compileSdk ${detectedCompileSdk}, targetSdk ${detectedTargetSdk}, minSdk 24"
+
+android {
+    namespace 'com.zoey.simpleclocklauncher'
+    compileSdk detectedCompileSdk
+
+    defaultConfig {
+        applicationId 'com.zoey.simpleclocklauncher'
+        minSdk 24
+        targetSdk detectedTargetSdk
+        versionCode 13
+        versionName '1.0.13-tint-matched-clock-shadow'
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+}
