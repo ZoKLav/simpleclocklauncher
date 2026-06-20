@@ -130,3 +130,7 @@ There is no warranty.
 Reasonable bug reports are welcome. Feature requests may be considered if they do not turn the launcher into a productivity cult, a widget landfill, or a subscription service with icons.
 
 Requests for ads, analytics, social feeds, crypto widgets, shopping integrations, mandatory accounts, or anything that makes the home screen worse will be treated with the solemn respect normally reserved for expired coupons and wet cardboard.
+
+![Preview](https://i.imgur.com/VfjPFIc.png)
+![Preview](https://i.imgur.com/56kdopv.png)
+![Preview](https://i.imgur.com/QoJwom9.png)
