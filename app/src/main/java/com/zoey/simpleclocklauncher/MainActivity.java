@@ -2,8 +2,11 @@ package com.zoey.simpleclocklauncher;
 
 import android.app.Activity;
 import android.app.Dialog;
+import android.Manifest;
+import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.net.Uri;
 import android.provider.Settings;
 import android.content.SharedPreferences;
@@ -11,6 +14,7 @@ import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.content.res.Configuration;
+import android.database.Cursor;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.LinearGradient;
@@ -18,9 +22,11 @@ import android.graphics.Paint;
 import android.graphics.RadialGradient;
 import android.graphics.RectF;
 import android.graphics.Shader;
+import android.graphics.SweepGradient;
 import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
+import android.os.BatteryManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -54,6 +60,12 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.io.File;
+import java.io.BufferedReader;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URLEncoder;
+import java.net.URL;
 import java.security.MessageDigest;
 import java.text.Collator;
 import java.util.ArrayList;
@@ -63,6 +75,9 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.Locale;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 public class MainActivity extends Activity {
     private static final String PREFS_NAME = "launcher_settings";
@@ -81,6 +96,9 @@ public class MainActivity extends Activity {
     private static final String PREF_CLOCK_ALIGN_VERTICAL = "clock_align_vertical";
     private static final String PREF_TINT_COLOR = "tint_color";
     private static final String PREF_TINT_OPACITY = "tint_opacity";
+    private static final String PREF_BACKGROUND_STYLE = "background_style";
+    private static final String PREF_SHOW_SWIPE_HINT = "show_swipe_hint";
+    private static final String PREF_SHOW_DRAWER_WATERMARK = "show_drawer_watermark";
     private static final String PREF_SHADE_FIX = "shade_fix";
     private static final String PREF_FULLSCREEN_MODE = "fullscreen_mode";
     private static final String PREF_CUSTOM_BACKGROUND_URI = "custom_background_uri";
@@ -92,6 +110,17 @@ public class MainActivity extends Activity {
     private static final String PREF_DRAWER_LOCKOUT_SECONDS = "drawer_lockout_seconds";
     private static final String PREF_DRAWER_FAILED_ATTEMPTS = "drawer_failed_attempts";
     private static final String PREF_DRAWER_LOCKOUT_UNTIL = "drawer_lockout_until";
+    private static final String PREF_SHOW_BATTERY_PERCENT = "show_battery_percent";
+    private static final String PREF_SHOW_UNREAD_COUNTER = "show_unread_counter";
+    private static final String PREF_SHOW_WEATHER = "show_weather";
+    private static final String PREF_WEATHER_COUNTRY = "weather_country";
+    private static final String PREF_WEATHER_POSTAL_CODE = "weather_postal_code";
+    private static final String PREF_WEATHER_UNIT = "weather_unit";
+    private static final String PREF_WEATHER_TEXT = "weather_text";
+    private static final String PREF_WEATHER_UPDATED = "weather_updated";
+    private static final String PREF_NOTIFICATION_SMS_COUNT = "notification_sms_count";
+    private static final String PREF_NOTIFICATION_EMAIL_COUNT = "notification_email_count";
+    private static final String ACTION_COUNTERS_UPDATED = "com.zoey.simpleclocklauncher.COUNTERS_UPDATED";
 
     private static final int CLOCK_ALIGN_START = 0;
     private static final int CLOCK_ALIGN_CENTER = 1;
@@ -103,17 +132,28 @@ public class MainActivity extends Activity {
     private static final int DEFAULT_CLOCK_OUTLINE_COLOR = Color.rgb(70, 0, 10);
     private static final int DEFAULT_TINT_COLOR = Color.rgb(82, 0, 16);
     private static final int DEFAULT_TINT_OPACITY = 70;
+    private static final int BG_STYLE_SOLID = 0;
+    private static final int BG_STYLE_RADIAL = 1;
+    private static final int BG_STYLE_VERTICAL = 2;
+    private static final int BG_STYLE_DIAGONAL = 3;
+    private static final int BG_STYLE_SQUARE = 4;
+    private static final int BG_STYLE_SPIRAL = 5;
+    private static final int DEFAULT_BACKGROUND_STYLE = BG_STYLE_RADIAL;
     private static final int DEFAULT_DRAWER_LOCKOUT_SECONDS = 60;
     private static final int DRAWER_LOCKOUT_AFTER_FAILS = 5;
     private static final String DEFAULT_CLOCK_FONT_KEY = "family:sans-serif-thin";
     private static final long SETTINGS_LONG_PRESS_MS = 1000L;
     private static final int REQUEST_PICK_BACKGROUND = 2407;
+    private static final int REQUEST_READ_SMS = 2408;
+    private static final long WEATHER_REFRESH_MS = 30L * 60L * 1000L;
 
     private FrameLayout root;
     private FrameLayout drawer;
     private ImageView backgroundImageView;
     private GradientOverlayView gradientOverlayView;
     private DrawerBackgroundView drawerBackgroundView;
+    private TextView swipeHintView;
+    private TextView drawerWatermarkView;
     private View notificationShadeTintView;
     private GridLayout appGrid;
     private TextView drawerTitle;
@@ -137,17 +177,30 @@ public class MainActivity extends Activity {
     private int clockAlignVertical = CLOCK_ALIGN_CENTER;
     private int tintColor = DEFAULT_TINT_COLOR;
     private int tintOpacity = DEFAULT_TINT_OPACITY;
+    private int backgroundStyle = DEFAULT_BACKGROUND_STYLE;
+    private boolean showSwipeHint = true;
+    private boolean showDrawerWatermark = true;
     private boolean shadeFixEnabled = true;
     private boolean fullscreenMode = true;
     private String customBackgroundUri = "";
     private int drawerIconSizeDp = 0;
     private int drawerLabelSizeSp = 0;
     private boolean drawerLockEnabled = false;
+    private boolean showBatteryPercent = true;
+    private boolean showUnreadCounter = false;
+    private boolean showWeather = false;
+    private String weatherCountry = "US";
+    private String weatherPostalCode = "";
+    private String weatherUnit = "F";
+    private String weatherText = "";
+    private long weatherUpdated = 0L;
+    private boolean weatherFetchInProgress = false;
     private String drawerPassHash = "";
     private int drawerLockoutSeconds = DEFAULT_DRAWER_LOCKOUT_SECONDS;
     private int drawerFailedAttempts = 0;
     private long drawerLockoutUntil = 0L;
     private boolean unlockDialogShowing = false;
+    private boolean counterReceiverRegistered = false;
     private String clockFontKey = DEFAULT_CLOCK_FONT_KEY;
     private Typeface clockTypeface = Typeface.create("sans-serif-thin", Typeface.NORMAL);
 
@@ -163,6 +216,21 @@ public class MainActivity extends Activity {
         public void run() {
             updateClock();
             scheduleNextMinuteTick();
+        }
+    };
+
+    private final BroadcastReceiver counterUpdateReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            updateClock();
+        }
+    };
+
+    private final Runnable weatherRefreshRunnable = new Runnable() {
+        @Override
+        public void run() {
+            refreshWeatherIfNeeded(false);
+            handler.postDelayed(this, WEATHER_REFRESH_MS);
         }
     };
 
@@ -209,9 +277,13 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        registerCounterReceiver();
         hideSystemUi();
         updateClock();
         scheduleNextMinuteTick();
+        refreshWeatherIfNeeded(false);
+        handler.removeCallbacks(weatherRefreshRunnable);
+        handler.postDelayed(weatherRefreshRunnable, WEATHER_REFRESH_MS);
         loadApps();
     }
 
@@ -219,11 +291,14 @@ public class MainActivity extends Activity {
     protected void onPause() {
         super.onPause();
         handler.removeCallbacks(clockTick);
+        handler.removeCallbacks(weatherRefreshRunnable);
+        unregisterCounterReceiver();
     }
 
     @Override
     protected void onDestroy() {
         handler.removeCallbacks(clockTick);
+        handler.removeCallbacks(weatherRefreshRunnable);
         super.onDestroy();
     }
 
@@ -255,6 +330,19 @@ public class MainActivity extends Activity {
             saveSettings();
             applyCustomBackground();
             Toast.makeText(this, "Custom background set", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == REQUEST_READ_SMS) {
+            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                Toast.makeText(this, "SMS counter access granted", Toast.LENGTH_SHORT).show();
+            } else {
+                Toast.makeText(this, "SMS permission denied; notification access can still count visible SMS alerts", Toast.LENGTH_LONG).show();
+            }
+            updateClock();
         }
     }
 
@@ -370,6 +458,9 @@ public class MainActivity extends Activity {
         clockAlignVertical = clampInt(prefs.getInt(PREF_CLOCK_ALIGN_VERTICAL, CLOCK_ALIGN_CENTER), CLOCK_ALIGN_START, CLOCK_ALIGN_END);
         tintColor = prefs.getInt(PREF_TINT_COLOR, DEFAULT_TINT_COLOR);
         tintOpacity = clampInt(prefs.getInt(PREF_TINT_OPACITY, DEFAULT_TINT_OPACITY), 0, 100);
+        backgroundStyle = clampInt(prefs.getInt(PREF_BACKGROUND_STYLE, DEFAULT_BACKGROUND_STYLE), BG_STYLE_SOLID, BG_STYLE_SPIRAL);
+        showSwipeHint = prefs.getBoolean(PREF_SHOW_SWIPE_HINT, true);
+        showDrawerWatermark = prefs.getBoolean(PREF_SHOW_DRAWER_WATERMARK, true);
         shadeFixEnabled = prefs.getBoolean(PREF_SHADE_FIX, true);
         fullscreenMode = prefs.getBoolean(PREF_FULLSCREEN_MODE, true);
         customBackgroundUri = prefs.getString(PREF_CUSTOM_BACKGROUND_URI, "");
@@ -382,6 +473,19 @@ public class MainActivity extends Activity {
             hiddenAppKeys.addAll(savedHiddenApps);
         }
         drawerLockEnabled = prefs.getBoolean(PREF_DRAWER_LOCK_ENABLED, false);
+        showBatteryPercent = prefs.getBoolean(PREF_SHOW_BATTERY_PERCENT, true);
+        showUnreadCounter = prefs.getBoolean(PREF_SHOW_UNREAD_COUNTER, false);
+        showWeather = prefs.getBoolean(PREF_SHOW_WEATHER, false);
+        weatherCountry = prefs.getString(PREF_WEATHER_COUNTRY, "US");
+        weatherPostalCode = prefs.getString(PREF_WEATHER_POSTAL_CODE, "");
+        weatherUnit = prefs.getString(PREF_WEATHER_UNIT, "F");
+        weatherText = prefs.getString(PREF_WEATHER_TEXT, "");
+        weatherUpdated = prefs.getLong(PREF_WEATHER_UPDATED, 0L);
+        if (weatherCountry == null || weatherCountry.trim().length() == 0) weatherCountry = "US";
+        weatherCountry = normalizeWeatherCountry(weatherCountry);
+        if (weatherPostalCode == null) weatherPostalCode = "";
+        if (weatherUnit == null || !(weatherUnit.equals("F") || weatherUnit.equals("C"))) weatherUnit = "F";
+        if (weatherText == null) weatherText = "";
         drawerPassHash = prefs.getString(PREF_DRAWER_PASS_HASH, "");
         drawerLockoutSeconds = clampInt(prefs.getInt(PREF_DRAWER_LOCKOUT_SECONDS, DEFAULT_DRAWER_LOCKOUT_SECONDS), 0, 1800);
         drawerFailedAttempts = clampInt(prefs.getInt(PREF_DRAWER_FAILED_ATTEMPTS, 0), 0, DRAWER_LOCKOUT_AFTER_FAILS);
@@ -421,6 +525,9 @@ public class MainActivity extends Activity {
                 .putInt(PREF_CLOCK_ALIGN_VERTICAL, clockAlignVertical)
                 .putInt(PREF_TINT_COLOR, tintColor)
                 .putInt(PREF_TINT_OPACITY, tintOpacity)
+                .putInt(PREF_BACKGROUND_STYLE, backgroundStyle)
+                .putBoolean(PREF_SHOW_SWIPE_HINT, showSwipeHint)
+                .putBoolean(PREF_SHOW_DRAWER_WATERMARK, showDrawerWatermark)
                 .putBoolean(PREF_SHADE_FIX, shadeFixEnabled)
                 .putBoolean(PREF_FULLSCREEN_MODE, fullscreenMode)
                 .putString(PREF_CUSTOM_BACKGROUND_URI, customBackgroundUri == null ? "" : customBackgroundUri)
@@ -428,6 +535,14 @@ public class MainActivity extends Activity {
                 .putInt(PREF_DRAWER_ICON_SIZE_DP, drawerIconSizeDp)
                 .putInt(PREF_DRAWER_LABEL_SIZE_SP, drawerLabelSizeSp)
                 .putBoolean(PREF_DRAWER_LOCK_ENABLED, drawerLockEnabled)
+                .putBoolean(PREF_SHOW_BATTERY_PERCENT, showBatteryPercent)
+                .putBoolean(PREF_SHOW_UNREAD_COUNTER, showUnreadCounter)
+                .putBoolean(PREF_SHOW_WEATHER, showWeather)
+                .putString(PREF_WEATHER_COUNTRY, normalizeWeatherCountry(weatherCountry))
+                .putString(PREF_WEATHER_POSTAL_CODE, weatherPostalCode == null ? "" : weatherPostalCode.trim())
+                .putString(PREF_WEATHER_UNIT, weatherUnit == null ? "F" : weatherUnit)
+                .putString(PREF_WEATHER_TEXT, weatherText == null ? "" : weatherText)
+                .putLong(PREF_WEATHER_UPDATED, weatherUpdated)
                 .putString(PREF_DRAWER_PASS_HASH, drawerPassHash == null ? "" : drawerPassHash)
                 .putInt(PREF_DRAWER_LOCKOUT_SECONDS, drawerLockoutSeconds)
                 .putInt(PREF_DRAWER_FAILED_ATTEMPTS, drawerFailedAttempts)
@@ -454,7 +569,7 @@ public class MainActivity extends Activity {
         applyCustomBackground();
 
         gradientOverlayView = new GradientOverlayView(this);
-        gradientOverlayView.setTintSettings(tintColor, tintOpacity);
+        gradientOverlayView.setTintSettings(tintColor, tintOpacity, backgroundStyle);
         root.addView(gradientOverlayView, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
@@ -471,6 +586,8 @@ public class MainActivity extends Activity {
         clockFaceView.setClockSettings(analogClock, use24Hour);
         clockFaceView.setClockAppearance(clockTypeface, clockNumberColor, clockOutline, clockOutlineColor);
         clockFaceView.setShadowTint(tintColor, tintOpacity);
+        clockFaceView.setBatteryVisible(showBatteryPercent);
+        clockFaceView.setTopInfoText(buildTopInfoText());
         clockFaceView.setClockLayout(clockMarginVertical, clockMarginSide, clockOffsetX, clockOffsetY, clockAlignHorizontal, clockAlignVertical);
         clockFaceView.setLongClickable(false);
         root.addView(clockFaceView, new FrameLayout.LayoutParams(
@@ -513,7 +630,7 @@ public class MainActivity extends Activity {
         ));
 
         drawerBackgroundView = new DrawerBackgroundView(this);
-        drawerBackgroundView.setTintSettings(tintColor, tintOpacity);
+        drawerBackgroundView.setTintSettings(tintColor, tintOpacity, backgroundStyle);
         drawer.addView(drawerBackgroundView, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
@@ -603,27 +720,28 @@ public class MainActivity extends Activity {
                 1f
         ));
 
-        TextView watermark = new TextView(this);
-        watermark.setText("Made by ZoeyKL");
-        watermark.setTextColor(Color.argb(120, 238, 220, 224));
-        watermark.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10);
-        watermark.setGravity(Gravity.LEFT);
-        watermark.setIncludeFontPadding(false);
+        drawerWatermarkView = new TextView(this);
+        drawerWatermarkView.setText("Made by ZoeyKL");
+        drawerWatermarkView.setTextColor(Color.argb(120, 238, 220, 224));
+        drawerWatermarkView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10);
+        drawerWatermarkView.setGravity(Gravity.LEFT);
+        drawerWatermarkView.setIncludeFontPadding(false);
+        drawerWatermarkView.setVisibility(showDrawerWatermark ? View.VISIBLE : View.GONE);
         FrameLayout.LayoutParams watermarkParams = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 Gravity.BOTTOM | Gravity.LEFT
         );
         watermarkParams.setMargins(dp(12), 0, 0, dp(9));
-        drawer.addView(watermark, watermarkParams);
+        drawer.addView(drawerWatermarkView, watermarkParams);
     }
 
     private void applyTintSettings() {
         if (gradientOverlayView != null) {
-            gradientOverlayView.setTintSettings(tintColor, tintOpacity);
+            gradientOverlayView.setTintSettings(tintColor, tintOpacity, backgroundStyle);
         }
         if (drawerBackgroundView != null) {
-            drawerBackgroundView.setTintSettings(tintColor, tintOpacity);
+            drawerBackgroundView.setTintSettings(tintColor, tintOpacity, backgroundStyle);
         }
         if (clockFaceView != null) {
             clockFaceView.setShadowTint(tintColor, tintOpacity);
@@ -659,12 +777,370 @@ public class MainActivity extends Activity {
         Calendar calendar = Calendar.getInstance();
         int hour = calendar.get(Calendar.HOUR_OF_DAY);
         int minute = calendar.get(Calendar.MINUTE);
+        int batteryPercent = showBatteryPercent ? readBatteryPercent() : -1;
         if (clockFaceView != null) {
             clockFaceView.setClockSettings(analogClock, use24Hour);
             clockFaceView.setClockAppearance(clockTypeface, clockNumberColor, clockOutline, clockOutlineColor);
             clockFaceView.setShadowTint(tintColor, tintOpacity);
+            clockFaceView.setBatteryVisible(showBatteryPercent);
+            clockFaceView.setTopInfoText(buildTopInfoText());
             clockFaceView.setClockLayout(clockMarginVertical, clockMarginSide, clockOffsetX, clockOffsetY, clockAlignHorizontal, clockAlignVertical);
+            clockFaceView.setBatteryPercent(batteryPercent);
             clockFaceView.setTime(hour, minute);
+        }
+    }
+
+    private int readBatteryPercent() {
+        try {
+            Intent batteryStatus = registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+            if (batteryStatus == null) {
+                return -1;
+            }
+            int level = batteryStatus.getIntExtra(BatteryManager.EXTRA_LEVEL, -1);
+            int scale = batteryStatus.getIntExtra(BatteryManager.EXTRA_SCALE, -1);
+            if (level < 0 || scale <= 0) {
+                return -1;
+            }
+            return clampInt(Math.round((level * 100f) / scale), 0, 100);
+        } catch (Exception ignored) {
+            return -1;
+        }
+    }
+
+
+    private void registerCounterReceiver() {
+        if (counterReceiverRegistered) {
+            return;
+        }
+        try {
+            IntentFilter filter = new IntentFilter(ACTION_COUNTERS_UPDATED);
+            if (Build.VERSION.SDK_INT >= 33) {
+                try {
+                    // Avoid referencing Context.RECEIVER_NOT_EXPORTED directly so the project
+                    // still compiles on PCs that only have older Android SDK platforms installed.
+                    // Numeric value 4 is RECEIVER_NOT_EXPORTED on Android 13+.
+                    Context.class
+                            .getMethod("registerReceiver", BroadcastReceiver.class, IntentFilter.class, int.class)
+                            .invoke(this, counterUpdateReceiver, filter, 4);
+                } catch (Exception reflectionFailed) {
+                    registerReceiver(counterUpdateReceiver, filter);
+                }
+            } else {
+                registerReceiver(counterUpdateReceiver, filter);
+            }
+            counterReceiverRegistered = true;
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void unregisterCounterReceiver() {
+        if (!counterReceiverRegistered) {
+            return;
+        }
+        try {
+            unregisterReceiver(counterUpdateReceiver);
+        } catch (Exception ignored) {
+        }
+        counterReceiverRegistered = false;
+    }
+
+    private String buildUnreadCounterText() {
+        if (!showUnreadCounter) {
+            return "";
+        }
+        int smsCount = readUnreadSmsCount();
+        boolean notificationAccess = isNotificationAccessEnabled();
+        if (smsCount < 0 && notificationAccess) {
+            smsCount = prefs.getInt(PREF_NOTIFICATION_SMS_COUNT, 0);
+        }
+        int emailCount = notificationAccess ? prefs.getInt(PREF_NOTIFICATION_EMAIL_COUNT, 0) : -1;
+        ArrayList<String> parts = new ArrayList<String>();
+        if (smsCount >= 0) {
+            parts.add("SMS " + smsCount);
+        }
+        if (emailCount >= 0) {
+            parts.add("EMAIL " + emailCount);
+        }
+        if (parts.isEmpty()) {
+            return "";
+        }
+        StringBuilder builder = new StringBuilder();
+        for (int i = 0; i < parts.size(); i++) {
+            if (i > 0) builder.append(" • ");
+            builder.append(parts.get(i));
+        }
+        return builder.toString();
+    }
+
+    private String buildTopInfoText() {
+        ArrayList<String> parts = new ArrayList<String>();
+        String unread = buildUnreadCounterText();
+        if (unread.length() > 0) {
+            parts.add(unread);
+        }
+        String weather = buildWeatherDisplayText();
+        if (weather.length() > 0) {
+            parts.add(weather);
+        }
+        StringBuilder builder = new StringBuilder();
+        for (int i = 0; i < parts.size(); i++) {
+            if (i > 0) builder.append(" • ");
+            builder.append(parts.get(i));
+        }
+        return builder.toString();
+    }
+
+    private String buildWeatherDisplayText() {
+        if (!showWeather) {
+            return "";
+        }
+        String zip = weatherPostalCode == null ? "" : weatherPostalCode.trim();
+        if (zip.length() == 0) {
+            return "WEATHER: SET ZIP";
+        }
+        String text = weatherText == null ? "" : weatherText.trim();
+        if (text.length() == 0) {
+            return "WEATHER --";
+        }
+        return text;
+    }
+
+    private void refreshWeatherIfNeeded(boolean force) {
+        if (!showWeather || weatherFetchInProgress) {
+            return;
+        }
+        if (weatherPostalCode == null || weatherPostalCode.trim().length() == 0) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (!force && weatherText != null && weatherText.trim().length() > 0 && now - weatherUpdated < WEATHER_REFRESH_MS) {
+            return;
+        }
+        weatherFetchInProgress = true;
+        final String country = normalizeWeatherCountry(weatherCountry);
+        final String postal = weatherPostalCode.trim();
+        final String unit = ("C".equals(weatherUnit)) ? "C" : "F";
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                String result = null;
+                try {
+                    result = fetchWeatherText(country, postal, unit);
+                } catch (Exception ignored) {
+                }
+                final String finalResult = result;
+                handler.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        weatherFetchInProgress = false;
+                        if (finalResult != null && finalResult.trim().length() > 0) {
+                            weatherText = finalResult.trim();
+                            weatherUpdated = System.currentTimeMillis();
+                            saveSettings();
+                            updateClock();
+                        } else if (weatherText == null || weatherText.trim().length() == 0) {
+                            weatherText = "WEATHER --";
+                            weatherUpdated = System.currentTimeMillis();
+                            saveSettings();
+                            updateClock();
+                        }
+                    }
+                });
+            }
+        }).start();
+    }
+
+    private String fetchWeatherText(String country, String postalCode, String unit) throws Exception {
+        String apiCountry = zippopotamusCountryCode(country);
+        String normalizedPostal = normalizeWeatherPostalForLookup(country, postalCode);
+        if (normalizedPostal.length() == 0) {
+            return "";
+        }
+        JSONObject geo = fetchJson("https://api.zippopotam.us/" + apiCountry + "/" + urlEncode(normalizedPostal));
+        if ((geo == null || !geo.has("places")) && "GB".equals(apiCountry) && normalizedPostal.indexOf(' ') > 0) {
+            String outward = normalizedPostal.substring(0, normalizedPostal.indexOf(' ')).trim();
+            if (outward.length() > 0) {
+                geo = fetchJson("https://api.zippopotam.us/" + apiCountry + "/" + urlEncode(outward));
+            }
+        }
+        if (geo == null) {
+            return "";
+        }
+        JSONArray places = geo.optJSONArray("places");
+        if (places == null || places.length() == 0) {
+            return "";
+        }
+        JSONObject place = places.getJSONObject(0);
+        String latitude = place.optString("latitude", "");
+        String longitude = place.optString("longitude", "");
+        if (latitude.length() == 0 || longitude.length() == 0) {
+            return "";
+        }
+        String unitParam = "C".equals(unit) ? "celsius" : "fahrenheit";
+        String url = "https://api.open-meteo.com/v1/forecast?latitude=" + urlEncode(latitude)
+                + "&longitude=" + urlEncode(longitude)
+                + "&current=temperature_2m,weather_code"
+                + "&temperature_unit=" + unitParam
+                + "&timezone=auto";
+        JSONObject forecast = fetchJson(url);
+        if (forecast == null) {
+            return "";
+        }
+        JSONObject current = forecast.optJSONObject("current");
+        if (current == null) {
+            return "";
+        }
+        if (!current.has("temperature_2m")) {
+            return "";
+        }
+        double temp = current.optDouble("temperature_2m", Double.NaN);
+        if (Double.isNaN(temp)) {
+            return "";
+        }
+        int code = current.optInt("weather_code", -1);
+        String label = weatherLabelForCode(code);
+        return label + " " + Math.round(temp) + "°" + unit;
+    }
+
+    private JSONObject fetchJson(String urlText) throws Exception {
+        HttpURLConnection connection = null;
+        InputStream stream = null;
+        try {
+            URL url = new URL(urlText);
+            connection = (HttpURLConnection) url.openConnection();
+            connection.setRequestMethod("GET");
+            connection.setConnectTimeout(7000);
+            connection.setReadTimeout(7000);
+            connection.setRequestProperty("User-Agent", "SimpleClockLauncher/1.0");
+            int code = connection.getResponseCode();
+            stream = (code >= 200 && code < 300) ? connection.getInputStream() : connection.getErrorStream();
+            if (stream == null || code < 200 || code >= 300) {
+                return null;
+            }
+            BufferedReader reader = new BufferedReader(new InputStreamReader(stream, "UTF-8"));
+            StringBuilder builder = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null) {
+                builder.append(line);
+            }
+            return new JSONObject(builder.toString());
+        } finally {
+            if (stream != null) {
+                try {
+                    stream.close();
+                } catch (Exception ignored) {
+                }
+            }
+            if (connection != null) {
+                connection.disconnect();
+            }
+        }
+    }
+
+    private String normalizeWeatherCountry(String country) {
+        if (country == null) return "US";
+        String c = country.trim().toUpperCase(Locale.US);
+        if (c.equals("CA") || c.equals("CANADA")) return "CA";
+        if (c.equals("MX") || c.equals("MEXICO")) return "MX";
+        if (c.equals("UK") || c.equals("GB") || c.equals("UNITED KINGDOM")) return "UK";
+        return "US";
+    }
+
+    private String zippopotamusCountryCode(String country) {
+        String c = normalizeWeatherCountry(country);
+        if ("UK".equals(c)) return "GB";
+        return c;
+    }
+
+    private String normalizeWeatherPostalForLookup(String country, String postal) {
+        if (postal == null) return "";
+        String p = postal.trim().toUpperCase(Locale.US).replaceAll("\\s+", " ");
+        String c = normalizeWeatherCountry(country);
+        if ("CA".equals(c)) {
+            p = p.replaceAll("[^A-Z0-9]", "");
+            if (p.length() > 3) p = p.substring(0, 3);
+        }
+        return p;
+    }
+
+    private String urlEncode(String value) throws Exception {
+        return URLEncoder.encode(value == null ? "" : value, "UTF-8").replace("+", "%20");
+    }
+
+    private String weatherLabelForCode(int code) {
+        if (code == 0) return "SUN";
+        if (code == 1 || code == 2) return "PARTLY";
+        if (code == 3) return "CLOUD";
+        if (code == 45 || code == 48) return "FOG";
+        if ((code >= 51 && code <= 67) || (code >= 80 && code <= 82)) return "RAIN";
+        if ((code >= 71 && code <= 77) || (code >= 85 && code <= 86)) return "SNOW";
+        if (code >= 95 && code <= 99) return "STORM";
+        return "WX";
+    }
+
+    private int readUnreadSmsCount() {
+        if (!hasReadSmsPermission()) {
+            return -1;
+        }
+        Cursor cursor = null;
+        try {
+            cursor = getContentResolver().query(
+                    Uri.parse("content://sms/inbox"),
+                    new String[]{"_id"},
+                    "read=0",
+                    null,
+                    null
+            );
+            return cursor == null ? -1 : Math.max(0, cursor.getCount());
+        } catch (Exception ignored) {
+            return -1;
+        } finally {
+            if (cursor != null) {
+                try {
+                    cursor.close();
+                } catch (Exception ignored) {
+                }
+            }
+        }
+    }
+
+    private boolean hasReadSmsPermission() {
+        return Build.VERSION.SDK_INT < 23 || checkSelfPermission(Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private void requestReadSmsPermissionIfNeeded() {
+        if (hasReadSmsPermission()) {
+            Toast.makeText(this, "SMS counter access already granted", Toast.LENGTH_SHORT).show();
+            updateClock();
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= 23) {
+            requestPermissions(new String[]{Manifest.permission.READ_SMS}, REQUEST_READ_SMS);
+        }
+    }
+
+    private boolean isNotificationAccessEnabled() {
+        try {
+            String enabled = Settings.Secure.getString(getContentResolver(), "enabled_notification_listeners");
+            if (enabled == null) {
+                return false;
+            }
+            String packageName = getPackageName().toLowerCase(Locale.US);
+            return enabled.toLowerCase(Locale.US).contains(packageName);
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private void openNotificationAccessSettings() {
+        try {
+            startActivity(new Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS"));
+        } catch (Exception e) {
+            try {
+                startActivity(new Intent(Settings.ACTION_SETTINGS));
+            } catch (Exception ignored) {
+                Toast.makeText(this, "Could not open notification access settings", Toast.LENGTH_SHORT).show();
+            }
         }
     }
 
@@ -1620,6 +2096,139 @@ public class MainActivity extends Activity {
         panel.addView(hourSwitch, switchParams());
         updateClockModeControls(analogSwitch, hourSwitch);
 
+        final Switch batterySwitch = makeSettingsSwitch("Show battery percentage", showBatteryPercent);
+        panel.addView(batterySwitch, switchParams());
+
+        final Switch unreadSwitch = makeSettingsSwitch("Show unread SMS/email counter", showUnreadCounter);
+        panel.addView(unreadSwitch, switchParams());
+
+        TextView unreadHint = new TextView(this);
+        unreadHint.setText("SMS can use READ_SMS permission. Email counts use notification access, so they reflect active email notifications rather than logging into your mail apps.");
+        unreadHint.setTextColor(Color.argb(145, 238, 220, 224));
+        unreadHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        LinearLayout.LayoutParams unreadHintParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        unreadHintParams.setMargins(0, dp(1), 0, dp(5));
+        panel.addView(unreadHint, unreadHintParams);
+
+        LinearLayout counterButtons = new LinearLayout(this);
+        counterButtons.setOrientation(LinearLayout.HORIZONTAL);
+        counterButtons.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
+        Button smsPermissionButton = new Button(this);
+        smsPermissionButton.setText(hasReadSmsPermission() ? "SMS access OK" : "Grant SMS access");
+        smsPermissionButton.setTextColor(Color.rgb(60, 0, 10));
+        counterButtons.addView(smsPermissionButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        Button notificationAccessButton = new Button(this);
+        notificationAccessButton.setText(isNotificationAccessEnabled() ? "Notif access OK" : "Notification access");
+        notificationAccessButton.setTextColor(Color.rgb(60, 0, 10));
+        LinearLayout.LayoutParams notificationButtonParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        notificationButtonParams.setMargins(dp(8), 0, 0, 0);
+        counterButtons.addView(notificationAccessButton, notificationButtonParams);
+        LinearLayout.LayoutParams counterButtonsParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        counterButtonsParams.setMargins(0, dp(1), 0, dp(10));
+        panel.addView(counterButtons, counterButtonsParams);
+
+        final Switch weatherSwitch = makeSettingsSwitch("Show weather", showWeather);
+        panel.addView(weatherSwitch, switchParams());
+
+        TextView weatherHint = new TextView(this);
+        weatherHint.setText("Weather uses only the postal code you enter. No GPS/location permission is used. Canada works best with the first 3 characters, like K1A.");
+        weatherHint.setTextColor(Color.argb(145, 238, 220, 224));
+        weatherHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        LinearLayout.LayoutParams weatherHintParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        weatherHintParams.setMargins(0, dp(1), 0, dp(5));
+        panel.addView(weatherHint, weatherHintParams);
+
+        LinearLayout weatherRow = new LinearLayout(this);
+        weatherRow.setOrientation(LinearLayout.HORIZONTAL);
+        weatherRow.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
+        final Spinner weatherCountrySpinner = new Spinner(this);
+        final String[] weatherCountries = new String[]{"US", "Canada", "Mexico", "UK"};
+        ArrayAdapter<String> weatherCountryAdapter = new ArrayAdapter<String>(this, android.R.layout.simple_spinner_item, weatherCountries);
+        weatherCountryAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        weatherCountrySpinner.setAdapter(weatherCountryAdapter);
+        int weatherCountryPosition = 0;
+        String normalizedWeatherCountry = normalizeWeatherCountry(weatherCountry);
+        if ("CA".equals(normalizedWeatherCountry)) weatherCountryPosition = 1;
+        else if ("MX".equals(normalizedWeatherCountry)) weatherCountryPosition = 2;
+        else if ("UK".equals(normalizedWeatherCountry)) weatherCountryPosition = 3;
+        weatherCountrySpinner.setSelection(weatherCountryPosition);
+        weatherRow.addView(weatherCountrySpinner, new LinearLayout.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                0.9f
+        ));
+
+        final EditText weatherPostalEdit = new EditText(this);
+        weatherPostalEdit.setSingleLine(true);
+        weatherPostalEdit.setText(weatherPostalCode);
+        weatherPostalEdit.setHint("Zip/postal");
+        weatherPostalEdit.setTextColor(Color.rgb(250, 232, 236));
+        weatherPostalEdit.setHintTextColor(Color.argb(130, 238, 220, 224));
+        weatherPostalEdit.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS);
+        weatherPostalEdit.setSelectAllOnFocus(false);
+        LinearLayout.LayoutParams weatherPostalParams = new LinearLayout.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                1.4f
+        );
+        weatherPostalParams.setMargins(dp(8), 0, 0, 0);
+        weatherRow.addView(weatherPostalEdit, weatherPostalParams);
+        panel.addView(weatherRow, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        LinearLayout weatherButtonRow = new LinearLayout(this);
+        weatherButtonRow.setOrientation(LinearLayout.HORIZONTAL);
+        weatherButtonRow.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
+        final Spinner weatherUnitSpinner = new Spinner(this);
+        final String[] weatherUnits = new String[]{"°F", "°C"};
+        ArrayAdapter<String> weatherUnitAdapter = new ArrayAdapter<String>(this, android.R.layout.simple_spinner_item, weatherUnits);
+        weatherUnitAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        weatherUnitSpinner.setAdapter(weatherUnitAdapter);
+        weatherUnitSpinner.setSelection("C".equals(weatherUnit) ? 1 : 0);
+        weatherButtonRow.addView(weatherUnitSpinner, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        Button weatherUpdateButton = new Button(this);
+        weatherUpdateButton.setText("Update weather");
+        weatherUpdateButton.setTextColor(Color.rgb(60, 0, 10));
+        LinearLayout.LayoutParams weatherUpdateParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        weatherUpdateParams.setMargins(dp(8), 0, 0, 0);
+        weatherButtonRow.addView(weatherUpdateButton, weatherUpdateParams);
+        final TextView weatherPreview = makeSettingsLabel(buildWeatherDisplayText().length() > 0 ? buildWeatherDisplayText() : "Weather preview --");
+        LinearLayout.LayoutParams weatherButtonRowParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        weatherButtonRowParams.setMargins(0, dp(4), 0, dp(4));
+        panel.addView(weatherButtonRow, weatherButtonRowParams);
+        LinearLayout.LayoutParams weatherPreviewParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        weatherPreviewParams.setMargins(0, 0, 0, dp(10));
+        panel.addView(weatherPreview, weatherPreviewParams);
+
         TextView fontLabel = makeSettingsLabel("Clock font");
         LinearLayout.LayoutParams fontLabelParams = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1686,6 +2295,34 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
+
+        TextView gradientStyleLabel = makeSettingsLabel("Background style");
+        LinearLayout.LayoutParams gradientStyleLabelParams = smallLabelParams();
+        gradientStyleLabelParams.setMargins(0, dp(8), 0, dp(2));
+        panel.addView(gradientStyleLabel, gradientStyleLabelParams);
+        final Spinner backgroundStyleSpinner = new Spinner(this);
+        final String[] backgroundStyleNames = new String[]{
+                "Solid tint",
+                "Radial gradient",
+                "Vertical gradient",
+                "Diagonal gradient",
+                "Square gradient",
+                "Spiral sweep"
+        };
+        ArrayAdapter<String> backgroundStyleAdapter = new ArrayAdapter<String>(this, android.R.layout.simple_spinner_item, backgroundStyleNames);
+        backgroundStyleAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        backgroundStyleSpinner.setAdapter(backgroundStyleAdapter);
+        backgroundStyleSpinner.setSelection(backgroundStyleToSpinnerIndex(backgroundStyle));
+        panel.addView(backgroundStyleSpinner, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        final Switch swipeHintSwitch = makeSettingsSwitch("Show swipe-up hint", showSwipeHint);
+        panel.addView(swipeHintSwitch, switchParams());
+
+        final Switch drawerWatermarkSwitch = makeSettingsSwitch("Show app drawer watermark", showDrawerWatermark);
+        panel.addView(drawerWatermarkSwitch, switchParams());
 
         final Switch shadeFixSwitch = makeSettingsSwitch("Tint system bars", shadeFixEnabled);
         panel.addView(shadeFixSwitch, switchParams());
@@ -2012,6 +2649,128 @@ public class MainActivity extends Activity {
             }
         });
 
+        batterySwitch.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showBatteryPercent = batterySwitch.isChecked();
+                saveSettings();
+                updateClock();
+            }
+        });
+
+        unreadSwitch.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showUnreadCounter = unreadSwitch.isChecked();
+                saveSettings();
+                if (showUnreadCounter && !hasReadSmsPermission()) {
+                    requestReadSmsPermissionIfNeeded();
+                }
+                updateClock();
+            }
+        });
+
+        smsPermissionButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                requestReadSmsPermissionIfNeeded();
+                smsPermissionButton.setText(hasReadSmsPermission() ? "SMS access OK" : "Grant SMS access");
+            }
+        });
+
+        notificationAccessButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                openNotificationAccessSettings();
+            }
+        });
+
+        weatherSwitch.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showWeather = weatherSwitch.isChecked();
+                saveSettings();
+                updateClock();
+                if (showWeather) {
+                    refreshWeatherIfNeeded(true);
+                }
+            }
+        });
+
+        weatherCountrySpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                if (position == 1) weatherCountry = "CA";
+                else if (position == 2) weatherCountry = "MX";
+                else if (position == 3) weatherCountry = "UK";
+                else weatherCountry = "US";
+                weatherText = "";
+                weatherUpdated = 0L;
+                saveSettings();
+                updateClock();
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {
+            }
+        });
+
+        weatherPostalEdit.addTextChangedListener(new TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) {
+            }
+
+            @Override
+            public void onTextChanged(CharSequence s, int start, int before, int count) {
+                weatherPostalCode = s == null ? "" : s.toString();
+                weatherText = "";
+                weatherUpdated = 0L;
+                saveSettings();
+                updateClock();
+            }
+
+            @Override
+            public void afterTextChanged(Editable s) {
+            }
+        });
+
+        weatherUnitSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                weatherUnit = position == 1 ? "C" : "F";
+                weatherText = "";
+                weatherUpdated = 0L;
+                saveSettings();
+                updateClock();
+                if (showWeather && weatherPostalCode != null && weatherPostalCode.trim().length() > 0) {
+                    refreshWeatherIfNeeded(true);
+                }
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {
+            }
+        });
+
+        weatherUpdateButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                weatherPostalCode = weatherPostalEdit.getText() == null ? "" : weatherPostalEdit.getText().toString();
+                showWeather = true;
+                weatherSwitch.setChecked(true);
+                weatherPreview.setText("Updating weather...");
+                saveSettings();
+                updateClock();
+                refreshWeatherIfNeeded(true);
+                handler.postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        weatherPreview.setText(buildWeatherDisplayText().length() > 0 ? buildWeatherDisplayText() : "Weather preview --");
+                    }
+                }, 1800L);
+            }
+        });
+
         fontSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override
             public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
@@ -2052,6 +2811,37 @@ public class MainActivity extends Activity {
 
             @Override
             public void onStopTrackingTouch(SeekBar seekBar) {
+            }
+        });
+
+        backgroundStyleSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                backgroundStyle = spinnerIndexToBackgroundStyle(position);
+                saveSettings();
+                applyTintSettings();
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {
+            }
+        });
+
+        swipeHintSwitch.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showSwipeHint = swipeHintSwitch.isChecked();
+                saveSettings();
+                applyTintSettings();
+            }
+        });
+
+        drawerWatermarkSwitch.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showDrawerWatermark = drawerWatermarkSwitch.isChecked();
+                saveSettings();
+                applyTintSettings();
             }
         });
 
@@ -2328,6 +3118,9 @@ public class MainActivity extends Activity {
                 clockAlignVertical = CLOCK_ALIGN_CENTER;
                 tintColor = DEFAULT_TINT_COLOR;
                 tintOpacity = DEFAULT_TINT_OPACITY;
+                backgroundStyle = DEFAULT_BACKGROUND_STYLE;
+                showSwipeHint = true;
+                showDrawerWatermark = true;
                 shadeFixEnabled = true;
                 fullscreenMode = true;
                 customBackgroundUri = "";
@@ -2336,6 +3129,8 @@ public class MainActivity extends Activity {
                 applyCustomBackground();
                 analogSwitch.setChecked(false);
                 hourSwitch.setChecked(true);
+                batterySwitch.setChecked(showBatteryPercent);
+                unreadSwitch.setChecked(showUnreadCounter);
                 updateClockModeControls(analogSwitch, hourSwitch);
                 int defaultFontIndex = findClockFontIndex(clockFontKey);
                 if (defaultFontIndex >= 0) {
@@ -2347,6 +3142,9 @@ public class MainActivity extends Activity {
                 tintColorInput.setText(colorToHex(tintColor));
                 tintOpacitySeek.setProgress(tintOpacity);
                 tintOpacityLabel.setText(makePercentLabel("Background / shade tint opacity", tintOpacity));
+                backgroundStyleSpinner.setSelection(backgroundStyleToSpinnerIndex(backgroundStyle));
+                swipeHintSwitch.setChecked(showSwipeHint);
+                drawerWatermarkSwitch.setChecked(showDrawerWatermark);
                 shadeFixSwitch.setChecked(shadeFixEnabled);
                 fullscreenSwitch.setChecked(fullscreenMode);
                 backgroundStatus.setText("Using Android wallpaper passthrough.");
@@ -2678,6 +3476,15 @@ public class MainActivity extends Activity {
         return editText;
     }
 
+    private int backgroundStyleToSpinnerIndex(int style) {
+        style = clampInt(style, BG_STYLE_SOLID, BG_STYLE_SPIRAL);
+        return style;
+    }
+
+    private int spinnerIndexToBackgroundStyle(int index) {
+        return clampInt(index, BG_STYLE_SOLID, BG_STYLE_SPIRAL);
+    }
+
     private Integer parseColorOrNull(String value) {
         if (value == null) return null;
         String trimmed = value.trim();
@@ -2942,6 +3749,9 @@ public class MainActivity extends Activity {
         private final RectF tempRect = new RectF();
         private int hour24 = 0;
         private int minute = 0;
+        private int batteryPercent = -1;
+        private boolean batteryVisible = true;
+        private String topInfoText = "";
         private boolean analog = false;
         private boolean use24Hour = true;
         private Typeface clockTypeface = Typeface.create("sans-serif-thin", Typeface.NORMAL);
@@ -3049,6 +3859,31 @@ public class MainActivity extends Activity {
             }
         }
 
+        void setBatteryPercent(int batteryPercent) {
+            batteryPercent = Math.max(-1, Math.min(100, batteryPercent));
+            if (this.batteryPercent != batteryPercent) {
+                this.batteryPercent = batteryPercent;
+                invalidate();
+            }
+        }
+
+        void setBatteryVisible(boolean visible) {
+            if (this.batteryVisible != visible) {
+                this.batteryVisible = visible;
+                this.cachedTextSize = -1f;
+                invalidate();
+            }
+        }
+
+        void setTopInfoText(String text) {
+            if (text == null) text = "";
+            if (!this.topInfoText.equals(text)) {
+                this.topInfoText = text;
+                this.cachedTextSize = -1f;
+                invalidate();
+            }
+        }
+
         @Override
         protected void onSizeChanged(int w, int h, int oldw, int oldh) {
             super.onSizeChanged(w, h, oldw, oldh);
@@ -3091,6 +3926,11 @@ public class MainActivity extends Activity {
                 hourText = String.format(Locale.US, "%02d", hour12);
             }
             String minuteText = String.format(Locale.US, "%02d", minute);
+            String topText = getTopInfoText();
+            String batteryText = getBatteryText();
+            float infoSize = getInfoTextSize(cachedTextSize);
+            float batterySize = getBatteryTextSize(cachedTextSize);
+            Typeface infoTypeface = Typeface.create("sans-serif-medium", Typeface.NORMAL);
 
             paint.setTextSize(cachedTextSize);
             paint.setTypeface(clockTypeface);
@@ -3099,28 +3939,71 @@ public class MainActivity extends Activity {
             float gap = cachedTextSize * 0.04f;
             float totalHeight = lineHeight * 2f + gap;
             float textWidth = Math.max(paint.measureText(hourText), paint.measureText(minuteText));
+
+            if (topText.length() > 0) {
+                totalHeight += getTextHeight(paint, infoSize, infoTypeface) + Math.max(3f, cachedTextSize * 0.055f);
+                textWidth = Math.max(textWidth, measureTextWithTypeface(paint, topText, infoSize, infoTypeface));
+            }
+
+            if (!use24Hour && width > 120 && height > 120) {
+                float amPmSize = Math.max(10f, cachedTextSize * 0.09f);
+                totalHeight += Math.max(2f, cachedTextSize * 0.03f) + getTextHeight(paint, amPmSize, infoTypeface);
+            }
+
+            if (batteryText.length() > 0) {
+                totalHeight += Math.max(3f, cachedTextSize * 0.06f) + getTextHeight(paint, batterySize, infoTypeface);
+                textWidth = Math.max(textWidth, measureTextWithTypeface(paint, batteryText, batterySize, infoTypeface));
+            }
+
             if (outlineEnabled) {
                 textWidth += cachedTextSize * 0.06f;
                 totalHeight += cachedTextSize * 0.06f;
             }
             float top = alignedTop(area, totalHeight) + height * offsetYPercent / 100f;
-            float baselineHour = top - metrics.ascent;
-            float baselineMinute = baselineHour + lineHeight + gap;
+            float cursorY = top;
             float centerX = alignedCenterX(area, textWidth) + width * offsetXPercent / 100f;
+
+            if (topText.length() > 0) {
+                Typeface oldTypeface = paint.getTypeface();
+                paint.setTypeface(infoTypeface);
+                paint.setTextSize(infoSize);
+                Paint.FontMetrics topMetrics = paint.getFontMetrics();
+                float topBaseline = cursorY - topMetrics.ascent;
+                drawOutlinedText(canvas, paint, topText, centerX, topBaseline, infoSize, false);
+                cursorY = topBaseline + topMetrics.descent + Math.max(3f, cachedTextSize * 0.055f);
+                paint.setTypeface(oldTypeface);
+            }
+
+            paint.setTypeface(clockTypeface);
+            paint.setTextSize(cachedTextSize);
+            metrics = paint.getFontMetrics();
+            float baselineHour = cursorY - metrics.ascent;
+            float baselineMinute = baselineHour + lineHeight + gap;
 
             drawOutlinedText(canvas, paint, hourText, centerX, baselineHour, cachedTextSize, true);
             drawOutlinedText(canvas, paint, minuteText, centerX, baselineMinute, cachedTextSize, true);
 
+            float contentBottom = baselineMinute + metrics.descent;
             if (!use24Hour && width > 120 && height > 120) {
                 Typeface oldTypeface = paint.getTypeface();
-                paint.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-                paint.setLetterSpacing(0.18f);
+                paint.setTypeface(infoTypeface);
                 float amPmSize = Math.max(10f, cachedTextSize * 0.09f);
-                float amPmX = centerX;
-                float amPmY = baselineMinute + Math.max(amPmSize * 1.45f, gap + amPmSize);
-                drawOutlinedText(canvas, paint, hour24 < 12 ? "AM" : "PM", amPmX, amPmY, amPmSize, false);
+                paint.setTextSize(amPmSize);
+                Paint.FontMetrics amPmMetrics = paint.getFontMetrics();
+                float amPmY = contentBottom + Math.max(2f, cachedTextSize * 0.03f) - amPmMetrics.ascent;
+                drawOutlinedText(canvas, paint, hour24 < 12 ? "AM" : "PM", centerX, amPmY, amPmSize, false);
+                contentBottom = amPmY + amPmMetrics.descent;
                 paint.setTypeface(oldTypeface);
-                paint.setLetterSpacing(0f);
+            }
+
+            if (batteryText.length() > 0) {
+                Typeface oldTypeface = paint.getTypeface();
+                paint.setTypeface(infoTypeface);
+                paint.setTextSize(batterySize);
+                Paint.FontMetrics batteryMetrics = paint.getFontMetrics();
+                float batteryY = contentBottom + Math.max(3f, cachedTextSize * 0.06f) - batteryMetrics.ascent;
+                drawOutlinedText(canvas, paint, batteryText, centerX, batteryY, batterySize, false);
+                paint.setTypeface(oldTypeface);
             }
         }
 
@@ -3128,6 +4011,7 @@ public class MainActivity extends Activity {
             float low = 8f;
             float high = Math.max(12f, Math.min(availableWidth, availableHeight) * 1.25f);
             paint.setTypeface(clockTypeface);
+            Typeface infoTypeface = Typeface.create("sans-serif-medium", Typeface.NORMAL);
             for (int i = 0; i < 28; i++) {
                 float mid = (low + high) * 0.5f;
                 paint.setTextSize(mid);
@@ -3136,6 +4020,27 @@ public class MainActivity extends Activity {
                 float gap = mid * 0.04f;
                 float totalHeight = lineHeight * 2f + gap;
                 float textWidth = Math.max(paint.measureText("88"), Math.max(paint.measureText("23"), paint.measureText("12")));
+
+                String topText = getTopInfoText();
+                if (topText.length() > 0) {
+                    float infoSize = getInfoTextSize(mid);
+                    totalHeight += getTextHeight(paint, infoSize, infoTypeface) + Math.max(3f, mid * 0.055f);
+                    textWidth = Math.max(textWidth, measureTextWithTypeface(paint, topText, infoSize, infoTypeface));
+                }
+
+                if (!use24Hour) {
+                    float amPmSize = Math.max(10f, mid * 0.09f);
+                    totalHeight += Math.max(2f, mid * 0.03f) + getTextHeight(paint, amPmSize, infoTypeface);
+                    textWidth = Math.max(textWidth, measureTextWithTypeface(paint, "PM", amPmSize, infoTypeface));
+                }
+
+                String batteryText = getBatteryText();
+                if (batteryText.length() > 0) {
+                    float batterySize = getBatteryTextSize(mid);
+                    totalHeight += Math.max(3f, mid * 0.06f) + getTextHeight(paint, batterySize, infoTypeface);
+                    textWidth = Math.max(textWidth, measureTextWithTypeface(paint, batteryText.length() > 0 ? batteryText : "100%", batterySize, infoTypeface));
+                }
+
                 if (outlineEnabled) {
                     textWidth += mid * 0.06f;
                     totalHeight += mid * 0.06f;
@@ -3153,10 +4058,57 @@ public class MainActivity extends Activity {
             RectF area = getClockArea(width, height);
             float availableWidth = Math.max(1f, area.width());
             float availableHeight = Math.max(1f, area.height());
-            float radius = Math.min(availableWidth, availableHeight) * 0.5f;
+
+            String topText = getTopInfoText();
+            String batteryText = getBatteryText();
+            Typeface infoTypeface = Typeface.create("sans-serif-medium", Typeface.NORMAL);
+
+            float trialBase = Math.min(availableWidth, availableHeight);
+            float infoSize = getInfoTextSize(trialBase * 0.72f);
+            float batterySize = getBatteryTextSize(trialBase * 0.72f);
+            Paint.FontMetrics topMetrics = null;
+            Paint.FontMetrics batteryMetrics = null;
+            float topGap = 0f;
+            float topHeight = 0f;
+            float batteryGap = 0f;
+            float batteryHeight = 0f;
+
+            if (topText.length() > 0) {
+                Typeface oldTypeface = analogPaint.getTypeface();
+                analogPaint.setTypeface(infoTypeface);
+                analogPaint.setTextSize(infoSize);
+                topMetrics = analogPaint.getFontMetrics();
+                topHeight = topMetrics.descent - topMetrics.ascent;
+                topGap = Math.max(4f, trialBase * 0.025f);
+                analogPaint.setTypeface(oldTypeface);
+            }
+            if (batteryText.length() > 0) {
+                Typeface oldTypeface = analogPaint.getTypeface();
+                analogPaint.setTypeface(infoTypeface);
+                analogPaint.setTextSize(batterySize);
+                batteryMetrics = analogPaint.getFontMetrics();
+                batteryHeight = batteryMetrics.descent - batteryMetrics.ascent;
+                batteryGap = Math.max(4f, trialBase * 0.025f);
+                analogPaint.setTypeface(oldTypeface);
+            }
+
+            float radius = Math.min(availableWidth * 0.5f, Math.max(1f, (availableHeight - topHeight - topGap - batteryHeight - batteryGap) * 0.5f));
             float diameter = radius * 2f;
+            float totalHeight = topHeight + topGap + diameter + batteryGap + batteryHeight;
             float centerX = alignedCenterX(area, diameter) + width * offsetXPercent / 100f;
-            float centerY = alignedTop(area, diameter) + radius + height * offsetYPercent / 100f;
+            float top = alignedTop(area, totalHeight) + height * offsetYPercent / 100f;
+
+            if (topText.length() > 0 && topMetrics != null) {
+                Typeface oldTypeface = analogPaint.getTypeface();
+                analogPaint.setTypeface(infoTypeface);
+                analogPaint.setTextSize(infoSize);
+                float topBaseline = top - topMetrics.ascent;
+                drawOutlinedText(canvas, analogPaint, topText, centerX, topBaseline, infoSize, false);
+                analogPaint.setTypeface(oldTypeface);
+            }
+
+            float clockTop = top + topHeight + topGap;
+            float centerY = clockTop + radius;
 
             analogPaint.setStyle(Paint.Style.STROKE);
             analogPaint.setStrokeWidth(Math.max(1.2f, radius * 0.018f));
@@ -3210,6 +4162,60 @@ public class MainActivity extends Activity {
             }
             analogPaint.setColor(numberColor);
             canvas.drawCircle(centerX, centerY, Math.max(4f, radius * 0.032f), analogPaint);
+
+            if (batteryText.length() > 0 && batteryMetrics != null) {
+                Typeface oldTypeface = analogPaint.getTypeface();
+                analogPaint.setTypeface(infoTypeface);
+                analogPaint.setTextSize(batterySize);
+                float batteryBaseline = clockTop + diameter + batteryGap - batteryMetrics.ascent;
+                drawOutlinedText(canvas, analogPaint, batteryText, centerX, batteryBaseline, batterySize, false);
+                analogPaint.setTypeface(oldTypeface);
+            }
+        }
+
+        private String getBatteryText() {
+            if (!batteryVisible || batteryPercent < 0) {
+                return "";
+            }
+            return String.format(Locale.US, "%d%%", batteryPercent);
+        }
+
+        private String getTopInfoText() {
+            return topInfoText == null ? "" : topInfoText.trim();
+        }
+
+        private float getBatteryTextSize(float baseSize) {
+            return Math.max(9f, baseSize * 0.115f);
+        }
+
+        private float getInfoTextSize(float baseSize) {
+            return Math.max(9f, baseSize * 0.105f);
+        }
+
+        private float getTextHeight(Paint targetPaint, float textSize, Typeface typeface) {
+            Typeface oldTypeface = targetPaint.getTypeface();
+            float oldTextSize = targetPaint.getTextSize();
+            if (typeface != null) {
+                targetPaint.setTypeface(typeface);
+            }
+            targetPaint.setTextSize(textSize);
+            Paint.FontMetrics metrics = targetPaint.getFontMetrics();
+            targetPaint.setTypeface(oldTypeface);
+            targetPaint.setTextSize(oldTextSize);
+            return metrics.descent - metrics.ascent;
+        }
+
+        private float measureTextWithTypeface(Paint targetPaint, String text, float textSize, Typeface typeface) {
+            Typeface oldTypeface = targetPaint.getTypeface();
+            float oldTextSize = targetPaint.getTextSize();
+            if (typeface != null) {
+                targetPaint.setTypeface(typeface);
+            }
+            targetPaint.setTextSize(textSize);
+            float width = targetPaint.measureText(text);
+            targetPaint.setTypeface(oldTypeface);
+            targetPaint.setTextSize(oldTextSize);
+            return width;
         }
 
         private RectF getClockArea(int width, int height) {
@@ -3305,22 +4311,27 @@ public class MainActivity extends Activity {
 
     private static class GradientOverlayView extends View {
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint extraPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private int lastWidth = -1;
         private int lastHeight = -1;
         private int tintColor = DEFAULT_TINT_COLOR;
         private int tintOpacity = DEFAULT_TINT_OPACITY;
+        private int backgroundStyle = DEFAULT_BACKGROUND_STYLE;
 
         GradientOverlayView(android.content.Context context) {
             super(context);
             setWillNotDraw(false);
         }
 
-        void setTintSettings(int color, int opacity) {
+        void setTintSettings(int color, int opacity, int style) {
             opacity = Math.max(0, Math.min(100, opacity));
-            if (tintColor != color || tintOpacity != opacity) {
+            style = Math.max(BG_STYLE_SOLID, Math.min(BG_STYLE_SPIRAL, style));
+            if (tintColor != color || tintOpacity != opacity || backgroundStyle != style) {
                 tintColor = color;
                 tintOpacity = opacity;
+                backgroundStyle = style;
                 paint.setShader(null);
+                extraPaint.setShader(null);
                 lastWidth = -1;
                 lastHeight = -1;
                 invalidate();
@@ -3336,6 +4347,10 @@ public class MainActivity extends Activity {
             return Color.argb(alpha, r, g, b);
         }
 
+        private int blackAlpha(int alphaAtFullOpacity) {
+            return Math.max(0, Math.min(255, Math.round(alphaAtFullOpacity * (tintOpacity / 100f))));
+        }
+
         @Override
         protected void onDraw(Canvas canvas) {
             super.onDraw(canvas);
@@ -3343,9 +4358,73 @@ public class MainActivity extends Activity {
             int height = getHeight();
             if (width <= 0 || height <= 0) return;
 
+            if (backgroundStyle == BG_STYLE_SOLID) {
+                canvas.drawColor(scaledTint(235, 1.0f));
+                return;
+            }
+
             if (width != lastWidth || height != lastHeight || paint.getShader() == null) {
                 lastWidth = width;
                 lastHeight = height;
+                buildShader(width, height);
+            }
+
+            if (backgroundStyle == BG_STYLE_SQUARE) {
+                canvas.drawColor(Color.argb(blackAlpha(190), 0, 0, 0));
+                int layers = 18;
+                float maxInset = Math.min(width, height) * 0.48f;
+                for (int i = 0; i < layers; i++) {
+                    float t = i / (float) (layers - 1);
+                    float inset = maxInset * t;
+                    int c = scaledTint(Math.round(210 * (1f - t * 0.72f)), 1.0f - t * 0.55f);
+                    paint.setShader(null);
+                    paint.setColor(c);
+                    canvas.drawRect(inset, inset, width - inset, height - inset, paint);
+                }
+                extraPaint.setShader(new RadialGradient(
+                        width * 0.5f,
+                        height * 0.42f,
+                        Math.max(width, height) * 0.75f,
+                        Color.argb(0, 0, 0, 0),
+                        Color.argb(blackAlpha(260), 0, 0, 0),
+                        Shader.TileMode.CLAMP));
+                canvas.drawRect(0, 0, width, height, extraPaint);
+                return;
+            }
+
+            canvas.drawRect(0, 0, width, height, paint);
+            if (backgroundStyle == BG_STYLE_SPIRAL) {
+                extraPaint.setShader(new RadialGradient(
+                        width * 0.5f,
+                        height * 0.45f,
+                        Math.max(width, height) * 0.72f,
+                        Color.argb(0, 0, 0, 0),
+                        Color.argb(blackAlpha(285), 0, 0, 0),
+                        Shader.TileMode.CLAMP));
+                canvas.drawRect(0, 0, width, height, extraPaint);
+            }
+        }
+
+        private void buildShader(int width, int height) {
+            if (backgroundStyle == BG_STYLE_VERTICAL) {
+                paint.setShader(new LinearGradient(
+                        0, 0, 0, height,
+                        new int[]{scaledTint(240, 1.0f), scaledTint(210, 0.45f), Color.argb(blackAlpha(310), 0, 0, 0)},
+                        new float[]{0f, 0.48f, 1f},
+                        Shader.TileMode.CLAMP));
+            } else if (backgroundStyle == BG_STYLE_DIAGONAL) {
+                paint.setShader(new LinearGradient(
+                        0, 0, width, height,
+                        new int[]{scaledTint(250, 1.05f), scaledTint(225, 0.45f), Color.argb(blackAlpha(320), 0, 0, 0)},
+                        new float[]{0f, 0.55f, 1f},
+                        Shader.TileMode.CLAMP));
+            } else if (backgroundStyle == BG_STYLE_SPIRAL) {
+                paint.setShader(new SweepGradient(
+                        width * 0.5f,
+                        height * 0.45f,
+                        new int[]{scaledTint(230, 1.05f), scaledTint(80, 0.65f), scaledTint(215, 0.42f), scaledTint(120, 0.85f), scaledTint(230, 1.05f)},
+                        new float[]{0f, 0.24f, 0.50f, 0.76f, 1f}));
+            } else {
                 float radius = Math.max(width, height) * 0.82f;
                 paint.setShader(new RadialGradient(
                         width * 0.5f,
@@ -3354,13 +4433,12 @@ public class MainActivity extends Activity {
                         new int[]{
                                 scaledTint(240, 1.00f),
                                 scaledTint(305, 0.45f),
-                                Color.argb(Math.max(0, Math.min(255, Math.round(350 * (tintOpacity / 100f)))), 0, 0, 0)
+                                Color.argb(blackAlpha(350), 0, 0, 0)
                         },
                         new float[]{0.0f, 0.55f, 1.0f},
                         Shader.TileMode.CLAMP
                 ));
             }
-            canvas.drawRect(0, 0, width, height, paint);
         }
     }
 
@@ -3371,17 +4449,20 @@ public class MainActivity extends Activity {
         private int lastHeight = -1;
         private int tintColor = DEFAULT_TINT_COLOR;
         private int tintOpacity = DEFAULT_TINT_OPACITY;
+        private int backgroundStyle = DEFAULT_BACKGROUND_STYLE;
 
         DrawerBackgroundView(android.content.Context context) {
             super(context);
             setWillNotDraw(false);
         }
 
-        void setTintSettings(int color, int opacity) {
+        void setTintSettings(int color, int opacity, int style) {
             opacity = Math.max(0, Math.min(100, opacity));
-            if (tintColor != color || tintOpacity != opacity) {
+            style = Math.max(BG_STYLE_SOLID, Math.min(BG_STYLE_SPIRAL, style));
+            if (tintColor != color || tintOpacity != opacity || backgroundStyle != style) {
                 tintColor = color;
                 tintOpacity = opacity;
+                backgroundStyle = style;
                 paint.setShader(null);
                 topPaint.setShader(null);
                 lastWidth = -1;
@@ -3399,6 +4480,10 @@ public class MainActivity extends Activity {
             return Color.argb(alpha, r, g, b);
         }
 
+        private int blackAlpha(int alphaAtFullOpacity) {
+            return Math.max(0, Math.min(255, Math.round(alphaAtFullOpacity * (tintOpacity / 100f))));
+        }
+
         @Override
         protected void onDraw(Canvas canvas) {
             super.onDraw(canvas);
@@ -3406,24 +4491,33 @@ public class MainActivity extends Activity {
             int height = getHeight();
             if (width <= 0 || height <= 0) return;
 
+            if (backgroundStyle == BG_STYLE_SOLID) {
+                canvas.drawColor(scaledTint(245, 0.85f));
+                canvas.drawColor(Color.argb(blackAlpha(210), 0, 0, 0));
+                return;
+            }
+
+            if (backgroundStyle == BG_STYLE_SQUARE) {
+                canvas.drawColor(Color.argb(blackAlpha(230), 0, 0, 0));
+                int layers = 16;
+                float maxInset = Math.min(width, height) * 0.46f;
+                for (int i = 0; i < layers; i++) {
+                    float t = i / (float) (layers - 1);
+                    float inset = maxInset * t;
+                    paint.setShader(null);
+                    paint.setColor(scaledTint(Math.round(260 * (1f - t * 0.65f)), 0.9f - t * 0.55f));
+                    canvas.drawRect(inset, inset, width - inset, height - inset, paint);
+                }
+                return;
+            }
+
             if (width != lastWidth || height != lastHeight || paint.getShader() == null) {
                 lastWidth = width;
                 lastHeight = height;
-                paint.setShader(new RadialGradient(
-                        width * 0.5f,
-                        height * 0.12f,
-                        Math.max(width, height) * 0.85f,
-                        new int[]{
-                                scaledTint(345, 0.95f),
-                                scaledTint(354, 0.30f),
-                                Color.argb(Math.max(0, Math.min(255, Math.round(360 * (tintOpacity / 100f)))), 0, 0, 0)
-                        },
-                        new float[]{0.0f, 0.50f, 1.0f},
-                        Shader.TileMode.CLAMP
-                ));
+                buildShader(width, height);
                 topPaint.setShader(new LinearGradient(
                         0, 0, 0, Math.max(1, height * 0.30f),
-                        Color.argb(Math.max(0, Math.min(255, Math.round(300 * (tintOpacity / 100f)))), 0, 0, 0),
+                        Color.argb(blackAlpha(300), 0, 0, 0),
                         Color.argb(0, 0, 0, 0),
                         Shader.TileMode.CLAMP
                 ));
@@ -3431,5 +4525,39 @@ public class MainActivity extends Activity {
             canvas.drawRect(0, 0, width, height, paint);
             canvas.drawRect(0, 0, width, height * 0.35f, topPaint);
         }
-    }
-}
+
+        private void buildShader(int width, int height) {
+            if (backgroundStyle == BG_STYLE_VERTICAL) {
+                paint.setShader(new LinearGradient(
+                        0, 0, 0, height,
+                        new int[]{scaledTint(325, 0.90f), scaledTint(290, 0.28f), Color.argb(blackAlpha(360), 0, 0, 0)},
+                        new float[]{0f, 0.50f, 1f},
+                        Shader.TileMode.CLAMP));
+            } else if (backgroundStyle == BG_STYLE_DIAGONAL) {
+                paint.setShader(new LinearGradient(
+                        0, 0, width, height,
+                        new int[]{scaledTint(335, 0.95f), scaledTint(300, 0.30f), Color.argb(blackAlpha(360), 0, 0, 0)},
+                        new float[]{0f, 0.52f, 1f},
+                        Shader.TileMode.CLAMP));
+            } else if (backgroundStyle == BG_STYLE_SPIRAL) {
+                paint.setShader(new SweepGradient(
+                        width * 0.5f,
+                        height * 0.25f,
+                        new int[]{scaledTint(330, 0.95f), scaledTint(150, 0.55f), scaledTint(320, 0.25f), scaledTint(170, 0.75f), scaledTint(330, 0.95f)},
+                        new float[]{0f, 0.24f, 0.55f, 0.80f, 1f}));
+            } else {
+                paint.setShader(new RadialGradient(
+                        width * 0.5f,
+                        height * 0.12f,
+                        Math.max(width, height) * 0.85f,
+                        new int[]{
+                                scaledTint(345, 0.95f),
+                                scaledTint(354, 0.30f),
+                                Color.argb(blackAlpha(360), 0, 0, 0)
+                        },
+                        new float[]{0.0f, 0.50f, 1.0f},
+                        Shader.TileMode.CLAMP
+                ));
+            }
+        }
+    }}

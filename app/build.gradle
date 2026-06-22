@@ -44,8 +44,8 @@ android {
         applicationId 'com.zoey.simpleclocklauncher'
         minSdk 24
         targetSdk detectedTargetSdk
-        versionCode 13
-        versionName '1.0.13-tint-matched-clock-shadow'
+        versionCode 18
+        versionName '1.0.18-sdk31-receiver-fix'
     }
 
     buildTypes {
