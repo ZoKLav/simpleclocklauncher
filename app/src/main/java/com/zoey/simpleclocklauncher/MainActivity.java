@@ -121,6 +121,8 @@ public class MainActivity extends Activity {
     private static final String PREF_DRAWER_LOCK_ENABLED = "drawer_lock_enabled";
     private static final String PREF_DRAWER_PASS_HASH = "drawer_pass_hash";
     private static final String PREF_DRAWER_LOCKOUT_SECONDS = "drawer_lockout_seconds";
+    private static final String PREF_DRAWER_RELOCK_SECONDS = "drawer_relock_seconds";
+    private static final String PREF_DRAWER_UNLOCKED_UNTIL = "drawer_unlocked_until";
     private static final String PREF_DRAWER_FAILED_ATTEMPTS = "drawer_failed_attempts";
     private static final String PREF_DRAWER_LOCKOUT_UNTIL = "drawer_lockout_until";
     private static final String PREF_SHOW_BATTERY_PERCENT = "show_battery_percent";
@@ -156,6 +158,7 @@ public class MainActivity extends Activity {
     private static final int ICON_STYLE_BUILTIN_MINIMAL = 1;
     private static final int ICON_STYLE_ADW_PACK = 2;
     private static final int DEFAULT_DRAWER_LOCKOUT_SECONDS = 60;
+    private static final int DEFAULT_DRAWER_RELOCK_SECONDS = 0;
     private static final int DRAWER_LOCKOUT_AFTER_FAILS = 5;
     private static final String DEFAULT_CLOCK_FONT_KEY = "family:sans-serif-thin";
     private static final long SETTINGS_LONG_PRESS_MS = 1000L;
@@ -215,8 +218,10 @@ public class MainActivity extends Activity {
     private boolean weatherFetchInProgress = false;
     private String drawerPassHash = "";
     private int drawerLockoutSeconds = DEFAULT_DRAWER_LOCKOUT_SECONDS;
+    private int drawerRelockSeconds = DEFAULT_DRAWER_RELOCK_SECONDS;
     private int drawerFailedAttempts = 0;
     private long drawerLockoutUntil = 0L;
+    private long drawerUnlockedUntil = 0L;
     private boolean unlockDialogShowing = false;
     private boolean counterReceiverRegistered = false;
     private String clockFontKey = DEFAULT_CLOCK_FONT_KEY;
@@ -512,8 +517,10 @@ public class MainActivity extends Activity {
         if (weatherText == null) weatherText = "";
         drawerPassHash = prefs.getString(PREF_DRAWER_PASS_HASH, "");
         drawerLockoutSeconds = clampInt(prefs.getInt(PREF_DRAWER_LOCKOUT_SECONDS, DEFAULT_DRAWER_LOCKOUT_SECONDS), 0, 1800);
+        drawerRelockSeconds = clampInt(prefs.getInt(PREF_DRAWER_RELOCK_SECONDS, DEFAULT_DRAWER_RELOCK_SECONDS), 0, 1800);
         drawerFailedAttempts = clampInt(prefs.getInt(PREF_DRAWER_FAILED_ATTEMPTS, 0), 0, DRAWER_LOCKOUT_AFTER_FAILS);
         drawerLockoutUntil = prefs.getLong(PREF_DRAWER_LOCKOUT_UNTIL, 0L);
+        drawerUnlockedUntil = prefs.getLong(PREF_DRAWER_UNLOCKED_UNTIL, 0L);
         if (drawerPassHash == null) drawerPassHash = "";
         clockFontKey = prefs.getString(PREF_CLOCK_FONT_KEY, DEFAULT_CLOCK_FONT_KEY);
 
@@ -571,8 +578,10 @@ public class MainActivity extends Activity {
                 .putLong(PREF_WEATHER_UPDATED, weatherUpdated)
                 .putString(PREF_DRAWER_PASS_HASH, drawerPassHash == null ? "" : drawerPassHash)
                 .putInt(PREF_DRAWER_LOCKOUT_SECONDS, drawerLockoutSeconds)
+                .putInt(PREF_DRAWER_RELOCK_SECONDS, drawerRelockSeconds)
                 .putInt(PREF_DRAWER_FAILED_ATTEMPTS, drawerFailedAttempts)
                 .putLong(PREF_DRAWER_LOCKOUT_UNTIL, drawerLockoutUntil)
+                .putLong(PREF_DRAWER_UNLOCKED_UNTIL, drawerUnlockedUntil)
                 .putString(PREF_CLOCK_FONT_KEY, clockFontKey)
                 .apply();
     }
@@ -1180,6 +1189,10 @@ public class MainActivity extends Activity {
     private void requestOpenDrawer(boolean animate) {
         if (drawerVisible) return;
         if (!drawerLockEnabled || drawerPassHash == null || drawerPassHash.trim().length() == 0) {
+            openDrawer(animate);
+            return;
+        }
+        if (isDrawerTemporarilyUnlocked()) {
             openDrawer(animate);
             return;
         }
@@ -1888,10 +1901,41 @@ public class MainActivity extends Activity {
         if (remaining > 0L) {
             return "Locked out for " + formatLockoutRemaining(remaining) + ".";
         }
+        if (hasPass && drawerUnlockedUntil > System.currentTimeMillis()) {
+            return "Unlocked for " + formatLockoutRemaining(drawerUnlockedUntil - System.currentTimeMillis()) + ".";
+        }
         return hasPass ? "App drawer is locked." : "Turned on, but no passcode has been set yet.";
     }
 
     private int findLockoutIndex(int seconds) {
+        if (seconds <= 0) return 0;
+        if (seconds <= 15) return 1;
+        if (seconds <= 30) return 2;
+        if (seconds <= 60) return 3;
+        if (seconds <= 300) return 4;
+        if (seconds <= 900) return 5;
+        return 6;
+    }
+
+    private boolean isDrawerTemporarilyUnlocked() {
+        if (drawerUnlockedUntil <= 0L) return false;
+        long now = System.currentTimeMillis();
+        if (drawerUnlockedUntil > now) return true;
+        drawerUnlockedUntil = 0L;
+        saveSettings();
+        return false;
+    }
+
+    private void markDrawerTemporarilyUnlocked() {
+        if (drawerRelockSeconds <= 0) {
+            drawerUnlockedUntil = 0L;
+        } else {
+            drawerUnlockedUntil = System.currentTimeMillis() + drawerRelockSeconds * 1000L;
+        }
+        saveSettings();
+    }
+
+    private int findRelockIndex(int seconds) {
         if (seconds <= 0) return 0;
         if (seconds <= 15) return 1;
         if (seconds <= 30) return 2;
@@ -2029,6 +2073,7 @@ public class MainActivity extends Activity {
                 drawerLockEnabled = true;
                 drawerFailedAttempts = 0;
                 drawerLockoutUntil = 0L;
+                drawerUnlockedUntil = 0L;
                 saveSettings();
                 if (afterSet != null) {
                     afterSet.run();
@@ -2143,7 +2188,7 @@ public class MainActivity extends Activity {
                 if (passcodeMatches(entered)) {
                     drawerFailedAttempts = 0;
                     drawerLockoutUntil = 0L;
-                    saveSettings();
+                    markDrawerTemporarilyUnlocked();
                     dialog.dismiss();
                     openDrawer(animate);
                     return;
@@ -2202,6 +2247,10 @@ public class MainActivity extends Activity {
     private void requestOpenSettings() {
         cancelSettingsLongPressWatch();
         if (!drawerLockEnabled || drawerPassHash == null || drawerPassHash.trim().length() == 0) {
+            showSettingsDialog();
+            return;
+        }
+        if (isDrawerTemporarilyUnlocked()) {
             showSettingsDialog();
             return;
         }
@@ -2288,7 +2337,7 @@ public class MainActivity extends Activity {
                 if (passcodeMatches(entered)) {
                     drawerFailedAttempts = 0;
                     drawerLockoutUntil = 0L;
-                    saveSettings();
+                    markDrawerTemporarilyUnlocked();
                     dialog.dismiss();
                     showSettingsDialog();
                     return;
@@ -2903,8 +2952,23 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
 
+        TextView relockLabel = makeSettingsLabel("Require passcode again after unlock");
+        LinearLayout.LayoutParams relockLabelParams = smallLabelParams();
+        relockLabelParams.setMargins(0, dp(8), 0, dp(2));
+        panel.addView(relockLabel, relockLabelParams);
+        final Spinner relockSpinner = new Spinner(this);
+        final int[] relockValues = new int[]{0, 15, 30, 60, 300, 900, 1800};
+        ArrayAdapter<String> relockAdapter = new ArrayAdapter<String>(this, android.R.layout.simple_spinner_item, new String[]{"Immediately", "15 seconds", "30 seconds", "1 minute", "5 minutes", "15 minutes", "30 minutes"});
+        relockAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        relockSpinner.setAdapter(relockAdapter);
+        relockSpinner.setSelection(findRelockIndex(drawerRelockSeconds));
+        panel.addView(relockSpinner, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
         TextView lockHint = new TextView(this);
-        lockHint.setText("When enabled, the same passcode is required before opening the app drawer or launcher settings. This is still a local launcher lock, not device encryption; Android settings and ADB are stronger than it.");
+        lockHint.setText("When enabled, the same passcode is required before opening the app drawer or launcher settings. The re-lock timer controls how long a successful unlock stays valid. This is still a local launcher lock, not device encryption; Android settings and ADB are stronger than it.");
         lockHint.setTextColor(Color.argb(145, 238, 220, 224));
         lockHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
         LinearLayout.LayoutParams lockHintParams = new LinearLayout.LayoutParams(
@@ -3404,6 +3468,7 @@ public class MainActivity extends Activity {
                     }
                 } else {
                     drawerLockEnabled = false;
+                    drawerUnlockedUntil = 0L;
                     lockStatusLabel.setText(makeDrawerLockStatusText());
                     saveSettings();
                 }
@@ -3431,6 +3496,26 @@ public class MainActivity extends Activity {
             public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
                 if (position >= 0 && position < lockoutValues.length) {
                     drawerLockoutSeconds = lockoutValues[position];
+                    saveSettings();
+                    lockStatusLabel.setText(makeDrawerLockStatusText());
+                }
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {
+            }
+        });
+
+        relockSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                if (position >= 0 && position < relockValues.length) {
+                    drawerRelockSeconds = relockValues[position];
+                    if (drawerRelockSeconds <= 0) {
+                        drawerUnlockedUntil = 0L;
+                    } else if (drawerUnlockedUntil > System.currentTimeMillis()) {
+                        drawerUnlockedUntil = System.currentTimeMillis() + drawerRelockSeconds * 1000L;
+                    }
                     saveSettings();
                     lockStatusLabel.setText(makeDrawerLockStatusText());
                 }
