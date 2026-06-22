@@ -44,8 +44,8 @@ android {
         applicationId 'com.zoey.simpleclocklauncher'
         minSdk 24
         targetSdk detectedTargetSdk
-        versionCode 18
-        versionName '1.0.18-sdk31-receiver-fix'
+        versionCode 22
+        versionName '1.0.22-uploaded-icon-sheet'
     }
 
     buildTypes {

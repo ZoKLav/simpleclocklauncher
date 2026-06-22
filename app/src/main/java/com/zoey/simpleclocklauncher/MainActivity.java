@@ -14,8 +14,11 @@ import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.content.res.Configuration;
+import android.content.res.Resources;
+import android.content.res.XmlResourceParser;
 import android.database.Cursor;
 import android.graphics.Canvas;
+import android.graphics.PixelFormat;
 import android.graphics.Color;
 import android.graphics.LinearGradient;
 import android.graphics.Paint;
@@ -24,6 +27,9 @@ import android.graphics.RectF;
 import android.graphics.Shader;
 import android.graphics.SweepGradient;
 import android.graphics.Typeface;
+import android.graphics.ColorFilter;
+import android.graphics.ColorMatrix;
+import android.graphics.ColorMatrixColorFilter;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
 import android.os.BatteryManager;
@@ -36,6 +42,7 @@ import android.text.InputType;
 import android.text.TextUtils;
 import android.text.TextWatcher;
 import android.util.TypedValue;
+import android.util.Xml;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
@@ -69,15 +76,19 @@ import java.net.URL;
 import java.security.MessageDigest;
 import java.text.Collator;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Calendar;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.Map;
 import java.util.Locale;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
+import org.xmlpull.v1.XmlPullParser;
 
 public class MainActivity extends Activity {
     private static final String PREFS_NAME = "launcher_settings";
@@ -103,6 +114,8 @@ public class MainActivity extends Activity {
     private static final String PREF_FULLSCREEN_MODE = "fullscreen_mode";
     private static final String PREF_CUSTOM_BACKGROUND_URI = "custom_background_uri";
     private static final String PREF_HIDDEN_APPS = "hidden_apps";
+    private static final String PREF_ICON_STYLE = "icon_style";
+    private static final String PREF_ICON_PACK_PACKAGE = "icon_pack_package";
     private static final String PREF_DRAWER_ICON_SIZE_DP = "drawer_icon_size_dp";
     private static final String PREF_DRAWER_LABEL_SIZE_SP = "drawer_label_size_sp";
     private static final String PREF_DRAWER_LOCK_ENABLED = "drawer_lock_enabled";
@@ -139,6 +152,9 @@ public class MainActivity extends Activity {
     private static final int BG_STYLE_SQUARE = 4;
     private static final int BG_STYLE_SPIRAL = 5;
     private static final int DEFAULT_BACKGROUND_STYLE = BG_STYLE_RADIAL;
+    private static final int ICON_STYLE_SYSTEM = 0;
+    private static final int ICON_STYLE_BUILTIN_MINIMAL = 1;
+    private static final int ICON_STYLE_ADW_PACK = 2;
     private static final int DEFAULT_DRAWER_LOCKOUT_SECONDS = 60;
     private static final int DRAWER_LOCKOUT_AFTER_FAILS = 5;
     private static final String DEFAULT_CLOCK_FONT_KEY = "family:sans-serif-thin";
@@ -183,6 +199,8 @@ public class MainActivity extends Activity {
     private boolean shadeFixEnabled = true;
     private boolean fullscreenMode = true;
     private String customBackgroundUri = "";
+    private int iconStyle = ICON_STYLE_SYSTEM;
+    private String iconPackPackage = "";
     private int drawerIconSizeDp = 0;
     private int drawerLabelSizeSp = 0;
     private boolean drawerLockEnabled = false;
@@ -465,6 +483,12 @@ public class MainActivity extends Activity {
         fullscreenMode = prefs.getBoolean(PREF_FULLSCREEN_MODE, true);
         customBackgroundUri = prefs.getString(PREF_CUSTOM_BACKGROUND_URI, "");
         if (customBackgroundUri == null) customBackgroundUri = "";
+        iconStyle = clampInt(prefs.getInt(PREF_ICON_STYLE, ICON_STYLE_SYSTEM), ICON_STYLE_SYSTEM, ICON_STYLE_ADW_PACK);
+        iconPackPackage = prefs.getString(PREF_ICON_PACK_PACKAGE, "");
+        if (iconPackPackage == null) iconPackPackage = "";
+        if (iconStyle == ICON_STYLE_ADW_PACK && iconPackPackage.trim().length() == 0) {
+            iconStyle = ICON_STYLE_SYSTEM;
+        }
         drawerIconSizeDp = clampInt(prefs.getInt(PREF_DRAWER_ICON_SIZE_DP, 0), 0, 96);
         drawerLabelSizeSp = clampInt(prefs.getInt(PREF_DRAWER_LABEL_SIZE_SP, 0), 0, 24);
         hiddenAppKeys.clear();
@@ -532,6 +556,8 @@ public class MainActivity extends Activity {
                 .putBoolean(PREF_FULLSCREEN_MODE, fullscreenMode)
                 .putString(PREF_CUSTOM_BACKGROUND_URI, customBackgroundUri == null ? "" : customBackgroundUri)
                 .putStringSet(PREF_HIDDEN_APPS, new HashSet<String>(hiddenAppKeys))
+                .putInt(PREF_ICON_STYLE, iconStyle)
+                .putString(PREF_ICON_PACK_PACKAGE, iconPackPackage == null ? "" : iconPackPackage)
                 .putInt(PREF_DRAWER_ICON_SIZE_DP, drawerIconSizeDp)
                 .putInt(PREF_DRAWER_LABEL_SIZE_SP, drawerLabelSizeSp)
                 .putBoolean(PREF_DRAWER_LOCK_ENABLED, drawerLockEnabled)
@@ -1219,6 +1245,9 @@ public class MainActivity extends Activity {
                 queryIntent.addCategory(Intent.CATEGORY_LAUNCHER);
                 List<ResolveInfo> resolveInfos = packageManager.queryIntentActivities(queryIntent, 0);
                 final List<AppEntry> apps = new ArrayList<>();
+                final IconPackData iconPackData = (iconStyle == ICON_STYLE_ADW_PACK)
+                        ? loadIconPackData(packageManager, iconPackPackage)
+                        : null;
 
                 for (ResolveInfo resolveInfo : resolveInfos) {
                     ActivityInfo activityInfo = resolveInfo.activityInfo;
@@ -1226,14 +1255,15 @@ public class MainActivity extends Activity {
                     if (getPackageName().equals(activityInfo.packageName)) continue;
 
                     CharSequence label = resolveInfo.loadLabel(packageManager);
-                    Drawable icon = resolveInfo.loadIcon(packageManager);
+                    String labelText = label == null ? activityInfo.packageName : label.toString();
+                    Drawable icon = makeIconForApp(packageManager, resolveInfo, labelText, activityInfo.packageName, activityInfo.name, iconPackData);
                     Intent launchIntent = new Intent(Intent.ACTION_MAIN);
                     launchIntent.addCategory(Intent.CATEGORY_LAUNCHER);
                     launchIntent.setComponent(new ComponentName(activityInfo.packageName, activityInfo.name));
                     launchIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
 
                     apps.add(new AppEntry(
-                            label == null ? activityInfo.packageName : label.toString(),
+                            labelText,
                             icon,
                             launchIntent,
                             activityInfo.packageName,
@@ -1259,6 +1289,269 @@ public class MainActivity extends Activity {
                 });
             }
         }, "AppLoader").start();
+    }
+
+
+    private Drawable makeIconForApp(PackageManager packageManager, ResolveInfo resolveInfo, String label, String packageName, String activityName, IconPackData iconPackData) {
+        if (iconStyle == ICON_STYLE_ADW_PACK && iconPackData != null) {
+            Drawable packed = iconPackData.loadDrawableFor(this, packageName, activityName);
+            if (packed != null) {
+                return packed;
+            }
+        }
+
+        Drawable systemIcon = null;
+        try {
+            systemIcon = resolveInfo.loadIcon(packageManager);
+        } catch (Exception ignored) {
+            systemIcon = null;
+        }
+
+        if (iconStyle == ICON_STYLE_BUILTIN_MINIMAL) {
+            int bundledIcon = findBundledMinimalIconResource(label, packageName);
+            if (bundledIcon != 0) {
+                try {
+                    if (Build.VERSION.SDK_INT >= 21) {
+                        return getResources().getDrawable(bundledIcon, getTheme());
+                    }
+                    return getResources().getDrawable(bundledIcon);
+                } catch (Exception ignored) {
+                    // Fall through to the actual app icon. Recognizable beats fake every time.
+                }
+            }
+            if (systemIcon != null) {
+                return systemIcon;
+            }
+        }
+
+        if (systemIcon != null) {
+            return systemIcon;
+        }
+        return new MinimalIconDrawable(null, label, tintColor, clockNumberColor, clockOutlineColor);
+    }
+
+    private int findBundledMinimalIconResource(String label, String packageName) {
+        String appLabel = label == null ? "" : label.trim().toLowerCase(Locale.US);
+        String pkg = packageName == null ? "" : packageName.trim().toLowerCase(Locale.US);
+        String text = appLabel + " " + pkg;
+
+        // Popular installed apps from the bundled Zoey Minimal sheet. Keep these first so
+        // "Messenger" does not become generic Messages, and "YouTube Music" does not become YouTube.
+        if (containsAny(pkg, "com.whatsapp.w4b") || containsAny(appLabel, "whatsapp business")) return R.drawable.zm_whatsapp_business;
+        if (containsAny(pkg, "com.whatsapp") || appLabel.equals("whatsapp")) return R.drawable.zm_whatsapp;
+        if (containsAny(pkg, "com.facebook.orca") || appLabel.equals("messenger")) return R.drawable.zm_messenger;
+        if (containsAny(pkg, "org.telegram.messenger", "org.thunderdog.challegram") || containsAny(appLabel, "telegram")) return R.drawable.zm_telegram;
+        if (containsAny(pkg, "com.discord") || containsAny(appLabel, "discord")) return R.drawable.zm_discord;
+        if (containsAny(pkg, "com.reddit.frontpage") || appLabel.equals("reddit")) return R.drawable.zm_reddit;
+        if (containsAny(pkg, "com.twitter.android")) return containsAny(appLabel, "twitter") ? R.drawable.zm_twitter : R.drawable.zm_x;
+        if (appLabel.equals("x")) return R.drawable.zm_x;
+        if (appLabel.equals("twitter")) return R.drawable.zm_twitter;
+        if (containsAny(pkg, "com.facebook.katana", "com.facebook.lite") || appLabel.equals("facebook")) return R.drawable.zm_facebook;
+        if (containsAny(pkg, "com.instagram.android") || containsAny(appLabel, "instagram")) return R.drawable.zm_instagram;
+        if (containsAny(pkg, "com.snapchat.android") || containsAny(appLabel, "snapchat")) return R.drawable.zm_snapchat;
+        if (containsAny(pkg, "com.zhiliaoapp.musically", "com.ss.android.ugc.trill") || containsAny(appLabel, "tiktok", "tik tok")) return R.drawable.zm_tiktok;
+        if (containsAny(pkg, "com.pinterest") || containsAny(appLabel, "pinterest")) return R.drawable.zm_pinterest;
+        if (containsAny(pkg, "com.linkedin.android") || containsAny(appLabel, "linkedin", "linked in")) return R.drawable.zm_linkedin;
+        if (containsAny(pkg, "com.spotify.music") || appLabel.equals("spotify")) return R.drawable.zm_spotify;
+        if (containsAny(pkg, "com.netflix.mediaclient") || appLabel.equals("netflix")) return R.drawable.zm_netflix;
+        if (containsAny(pkg, "tv.twitch.android") || containsAny(appLabel, "twitch")) return R.drawable.zm_twitch;
+        if (containsAny(pkg, "com.google.android.apps.youtube.music") || containsAny(appLabel, "youtube music", "yt music")) return R.drawable.zm_youtube_music;
+        if (containsAny(pkg, "com.amazon.mshop", "com.amazon.windowshop") || appLabel.equals("amazon")) return R.drawable.zm_amazon;
+        if (containsAny(pkg, "com.ubercab") || appLabel.equals("uber")) return R.drawable.zm_uber;
+        if (containsAny(pkg, "com.airbnb.android") || containsAny(appLabel, "airbnb")) return R.drawable.zm_airbnb;
+        if (containsAny(pkg, "com.slack") || appLabel.equals("slack")) return R.drawable.zm_slack;
+        if (containsAny(pkg, "us.zoom.videomeetings") || appLabel.equals("zoom")) return R.drawable.zm_zoom;
+        if (containsAny(pkg, "com.disney.disneyplus") || containsAny(appLabel, "disney+", "disney plus")) return R.drawable.zm_disneyplus;
+        if (containsAny(pkg, "com.kiloo.subwaysurf", "com.sybo.subwaysurfers") || containsAny(appLabel, "subway surfers")) return R.drawable.zm_subway_surfers;
+
+        // Android / Google defaults from the same sheet.
+        if (containsAny(pkg, "com.android.vending") || appLabel.equals("play store") || appLabel.equals("google play store")) return R.drawable.zm_play_store;
+        if (containsAny(pkg, "com.android.chrome") || appLabel.equals("chrome")) return R.drawable.zm_chrome;
+        if (containsAny(pkg, "com.google.android.gm") || appLabel.equals("gmail")) return R.drawable.zm_gmail;
+        if (containsAny(pkg, "com.google.android.apps.maps") || appLabel.equals("maps") || appLabel.equals("google maps")) return R.drawable.zm_maps;
+        if (containsAny(pkg, "com.google.android.youtube") || appLabel.equals("youtube")) return R.drawable.zm_youtube;
+        if (containsAny(pkg, "com.google.android.apps.docs") || appLabel.equals("drive") || appLabel.equals("google drive")) return R.drawable.zm_drive;
+        if (containsAny(pkg, "com.google.android.apps.photos") || appLabel.equals("photos") || appLabel.equals("google photos")) return R.drawable.zm_photos;
+        if (containsAny(pkg, "com.google.android.keep") || containsAny(appLabel, "keep", "notes keep", "google keep")) return R.drawable.zm_keep;
+        if (containsAny(pkg, "com.google.android.videos") || containsAny(appLabel, "google tv", "play movies", "movies & tv")) return R.drawable.zm_google_tv;
+        if (containsAny(pkg, "com.google.android.apps.walletnfcrel", "com.google.android.gms.tapandpay") || containsAny(appLabel, "wallet", "google wallet", "pay")) return R.drawable.zm_wallet;
+        if (containsAny(pkg, "com.google.android.apps.magazines") || appLabel.equals("news") || appLabel.equals("google news")) return R.drawable.zm_news;
+        if (containsAny(pkg, "com.google.android.apps.safety", "com.google.android.apps.safetycenter", "com.google.android.apps.safetyhub") || containsAny(appLabel, "safety", "personal safety")) return R.drawable.zm_safety;
+        if (containsAny(pkg, "com.google.android.apps.googleassistant") || appLabel.equals("assistant") || appLabel.equals("google assistant")) return R.drawable.zm_assistant;
+        if (containsAny(pkg, "com.google.android.googlequicksearchbox")) {
+            return containsAny(appLabel, "assistant") ? R.drawable.zm_assistant : R.drawable.zm_google;
+        }
+        if (appLabel.equals("google")) return R.drawable.zm_google;
+
+        // Generic system categories. These are deliberately conservative; if it is not a clear match, fall back to the app's own icon.
+        if (containsAny(pkg, "com.google.android.dialer", "com.android.dialer", "com.samsung.android.dialer", "com.android.phone") || containsAny(appLabel, "phone", "dialer")) return R.drawable.zm_phone;
+        if (containsAny(pkg, "com.google.android.apps.messaging", "com.android.mms", "com.samsung.android.messaging") || containsAny(appLabel, "messages", "messaging", "sms", "mms")) return R.drawable.zm_messages;
+        if (containsAny(pkg, "com.google.android.contacts", "com.android.contacts", "com.samsung.android.app.contacts") || containsAny(appLabel, "contacts", "people")) return R.drawable.zm_contacts;
+        if (containsAny(pkg, "camera", "googlecamera", "snapcam") || appLabel.equals("camera")) return R.drawable.zm_camera;
+        if (containsAny(pkg, "com.google.android.apps.nbu.files", "com.google.android.documentsui", "com.android.documentsui", "com.sec.android.app.myfiles") || containsAny(appLabel, "files", "my files", "file manager")) return R.drawable.zm_files;
+        if (containsAny(pkg, "com.google.android.calendar", "com.samsung.android.calendar", "com.android.calendar") || containsAny(appLabel, "calendar")) return R.drawable.zm_calendar;
+        if (containsAny(pkg, "com.google.android.deskclock", "com.android.deskclock") || containsAny(appLabel, "clock", "timer", "stopwatch")) return R.drawable.zm_clock;
+        if (containsAny(pkg, "calculator") || containsAny(appLabel, "calculator", "calc")) return R.drawable.zm_calculator;
+        if (containsAny(pkg, "com.android.settings") || appLabel.equals("settings")) return R.drawable.zm_settings;
+        if (containsAny(pkg, "recorder", "voicenote", "soundrecorder") || containsAny(appLabel, "recorder", "voice recorder", "sound recorder")) return R.drawable.zm_recorder;
+        if (containsAny(pkg, "weather", "daemonapp") || containsAny(appLabel, "weather", "forecast")) return R.drawable.zm_weather;
+
+        return 0;
+    }
+
+    private boolean containsAny(String text, String... needles) {
+        if (text == null) return false;
+        for (String needle : needles) {
+            if (needle != null && needle.length() > 0 && text.contains(needle)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private List<IconPackOption> buildIconPackOptions() {
+        ArrayList<IconPackOption> options = new ArrayList<IconPackOption>();
+        options.add(new IconPackOption("System app icons", ICON_STYLE_SYSTEM, ""));
+        options.add(new IconPackOption("Zoey Minimal (bundled icons)", ICON_STYLE_BUILTIN_MINIMAL, ""));
+        for (IconPackOption option : findInstalledAdwIconPacks()) {
+            options.add(option);
+        }
+        return options;
+    }
+
+    private int findIconPackOptionIndex(List<IconPackOption> options) {
+        if (options == null || options.isEmpty()) return 0;
+        for (int i = 0; i < options.size(); i++) {
+            IconPackOption option = options.get(i);
+            if (option.style == iconStyle) {
+                if (iconStyle != ICON_STYLE_ADW_PACK || safeString(option.packageName).equals(safeString(iconPackPackage))) {
+                    return i;
+                }
+            }
+        }
+        if (iconStyle == ICON_STYLE_BUILTIN_MINIMAL && options.size() > 1) return 1;
+        return 0;
+    }
+
+    private List<IconPackOption> findInstalledAdwIconPacks() {
+        PackageManager pm = getPackageManager();
+        LinkedHashMap<String, IconPackOption> packs = new LinkedHashMap<String, IconPackOption>();
+        String[] actions = new String[]{
+                "org.adw.launcher.THEMES",
+                "com.novalauncher.THEME",
+                "com.teslacoilsw.launcher.THEME",
+                "com.anddoes.launcher.THEME",
+                "com.gau.go.launcherex.theme"
+        };
+        for (String action : actions) {
+            try {
+                Intent intent = new Intent(action);
+                List<ResolveInfo> infos = pm.queryIntentActivities(intent, 0);
+                for (ResolveInfo info : infos) {
+                    if (info == null || info.activityInfo == null) continue;
+                    String pkg = info.activityInfo.packageName;
+                    if (pkg == null || pkg.equals(getPackageName()) || packs.containsKey(pkg)) continue;
+                    CharSequence label = info.loadLabel(pm);
+                    String name = label == null ? pkg : label.toString();
+                    packs.put(pkg, new IconPackOption("Pack: " + name, ICON_STYLE_ADW_PACK, pkg));
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        ArrayList<IconPackOption> result = new ArrayList<IconPackOption>(packs.values());
+        final Collator collator = Collator.getInstance(Locale.getDefault());
+        Collections.sort(result, new java.util.Comparator<IconPackOption>() {
+            @Override
+            public int compare(IconPackOption a, IconPackOption b) {
+                return collator.compare(a.label, b.label);
+            }
+        });
+        return result;
+    }
+
+    private IconPackData loadIconPackData(PackageManager pm, String packageName) {
+        if (packageName == null || packageName.trim().length() == 0) return null;
+        try {
+            Resources res = pm.getResourcesForApplication(packageName);
+            IconPackData data = new IconPackData(packageName, res);
+            boolean parsed = false;
+            int xmlId = res.getIdentifier("appfilter", "xml", packageName);
+            if (xmlId != 0) {
+                XmlResourceParser parser = null;
+                try {
+                    parser = res.getXml(xmlId);
+                    parseIconPackAppFilter(parser, data);
+                    parsed = true;
+                } finally {
+                    if (parser != null) parser.close();
+                }
+            }
+            int rawId = res.getIdentifier("appfilter", "raw", packageName);
+            if (rawId != 0) {
+                InputStream in = null;
+                try {
+                    in = res.openRawResource(rawId);
+                    XmlPullParser parser = Xml.newPullParser();
+                    parser.setInput(in, "UTF-8");
+                    parseIconPackAppFilter(parser, data);
+                    parsed = true;
+                } finally {
+                    if (in != null) {
+                        try { in.close(); } catch (Exception ignored) {}
+                    }
+                }
+            }
+            if (!parsed) {
+                String[] assetNames = new String[]{"appfilter.xml", "assets/appfilter.xml", "xml/appfilter.xml"};
+                for (String name : assetNames) {
+                    InputStream in = null;
+                    try {
+                        in = res.getAssets().open(name);
+                        XmlPullParser parser = Xml.newPullParser();
+                        parser.setInput(in, "UTF-8");
+                        parseIconPackAppFilter(parser, data);
+                        parsed = true;
+                        break;
+                    } catch (Exception ignored) {
+                    } finally {
+                        if (in != null) {
+                            try { in.close(); } catch (Exception ignored) {}
+                        }
+                    }
+                }
+            }
+            return parsed && !data.componentToDrawable.isEmpty() ? data : null;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private void parseIconPackAppFilter(XmlPullParser parser, IconPackData data) throws Exception {
+        int type;
+        while ((type = parser.next()) != XmlPullParser.END_DOCUMENT) {
+            if (type != XmlPullParser.START_TAG) continue;
+            String tag = parser.getName();
+            if (!"item".equalsIgnoreCase(tag)) continue;
+            String component = parser.getAttributeValue(null, "component");
+            String drawable = parser.getAttributeValue(null, "drawable");
+            if (component == null || drawable == null) continue;
+            String key = normalizeIconPackComponent(component);
+            if (key.length() > 0 && drawable.trim().length() > 0) {
+                data.componentToDrawable.put(key, drawable.trim());
+            }
+        }
+    }
+
+    private String normalizeIconPackComponent(String component) {
+        if (component == null) return "";
+        String value = component.trim();
+        if (value.startsWith("ComponentInfo{")) {
+            value = value.substring("ComponentInfo{".length());
+        }
+        if (value.endsWith("}")) {
+            value = value.substring(0, value.length() - 1);
+        }
+        return value.trim().toLowerCase(Locale.US);
     }
 
     private void filterApps() {
@@ -2532,6 +2825,34 @@ public class MainActivity extends Activity {
         drawerSizeHintParams.setMargins(0, dp(1), 0, dp(10));
         panel.addView(drawerSizeHint, drawerSizeHintParams);
 
+        TextView iconThemeLabel = makeSettingsLabel("Drawer icon theme");
+        panel.addView(iconThemeLabel, smallLabelParams());
+        final List<IconPackOption> iconPackOptions = buildIconPackOptions();
+        final Spinner iconThemeSpinner = new Spinner(this);
+        ArrayList<String> iconThemeLabels = new ArrayList<String>();
+        for (IconPackOption option : iconPackOptions) {
+            iconThemeLabels.add(option.label);
+        }
+        ArrayAdapter<String> iconThemeAdapter = new ArrayAdapter<String>(this, android.R.layout.simple_spinner_item, iconThemeLabels);
+        iconThemeAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        iconThemeSpinner.setAdapter(iconThemeAdapter);
+        iconThemeSpinner.setSelection(findIconPackOptionIndex(iconPackOptions));
+        panel.addView(iconThemeSpinner, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        TextView iconThemeHint = new TextView(this);
+        iconThemeHint.setText("Zoey Minimal uses the uploaded red/dark icon sheet for matching default and popular apps, then falls back to normal system icons. ADW/Nova-style packs use appfilter.xml when available.");
+        iconThemeHint.setTextColor(Color.argb(145, 238, 220, 224));
+        iconThemeHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        LinearLayout.LayoutParams iconThemeHintParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        iconThemeHintParams.setMargins(0, dp(1), 0, dp(10));
+        panel.addView(iconThemeHint, iconThemeHintParams);
+
         Button manageHiddenButton = new Button(this);
         manageHiddenButton.setText("Manage hidden apps (" + countHiddenApps() + ")");
         manageHiddenButton.setTextColor(Color.rgb(60, 0, 10));
@@ -3033,6 +3354,27 @@ public class MainActivity extends Activity {
             }
         });
 
+        iconThemeSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                if (position >= 0 && position < iconPackOptions.size()) {
+                    IconPackOption selected = iconPackOptions.get(position);
+                    boolean changed = iconStyle != selected.style
+                            || !safeString(iconPackPackage).equals(safeString(selected.packageName));
+                    iconStyle = selected.style;
+                    iconPackPackage = selected.packageName == null ? "" : selected.packageName;
+                    if (changed) {
+                        saveSettings();
+                        loadApps();
+                    }
+                }
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {
+            }
+        });
+
         manageHiddenButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -3124,6 +3466,8 @@ public class MainActivity extends Activity {
                 shadeFixEnabled = true;
                 fullscreenMode = true;
                 customBackgroundUri = "";
+                iconStyle = ICON_STYLE_SYSTEM;
+                iconPackPackage = "";
                 drawerIconSizeDp = 0;
                 drawerLabelSizeSp = 0;
                 applyCustomBackground();
@@ -3145,6 +3489,7 @@ public class MainActivity extends Activity {
                 backgroundStyleSpinner.setSelection(backgroundStyleToSpinnerIndex(backgroundStyle));
                 swipeHintSwitch.setChecked(showSwipeHint);
                 drawerWatermarkSwitch.setChecked(showDrawerWatermark);
+                iconThemeSpinner.setSelection(findIconPackOptionIndex(iconPackOptions));
                 shadeFixSwitch.setChecked(shadeFixEnabled);
                 fullscreenSwitch.setChecked(fullscreenMode);
                 backgroundStatus.setText("Using Android wallpaper passthrough.");
@@ -3485,6 +3830,10 @@ public class MainActivity extends Activity {
         return clampInt(index, BG_STYLE_SOLID, BG_STYLE_SPIRAL);
     }
 
+    private String safeString(String value) {
+        return value == null ? "" : value;
+    }
+
     private Integer parseColorOrNull(String value) {
         if (value == null) return null;
         String trimmed = value.trim();
@@ -3722,6 +4071,268 @@ public class MainActivity extends Activity {
             this.key = key;
             this.filePath = filePath;
             this.familyName = familyName;
+        }
+    }
+
+
+    private static class IconPackOption {
+        final String label;
+        final int style;
+        final String packageName;
+
+        IconPackOption(String label, int style, String packageName) {
+            this.label = label == null ? "" : label;
+            this.style = style;
+            this.packageName = packageName == null ? "" : packageName;
+        }
+    }
+
+    private static class IconPackData {
+        final String packageName;
+        final Resources resources;
+        final Map<String, String> componentToDrawable = new HashMap<String, String>();
+        final Map<String, Integer> drawableResourceCache = new HashMap<String, Integer>();
+
+        IconPackData(String packageName, Resources resources) {
+            this.packageName = packageName;
+            this.resources = resources;
+        }
+
+        Drawable loadDrawableFor(Context context, String appPackage, String activityName) {
+            if (resources == null || appPackage == null || activityName == null) return null;
+            String exact = (appPackage + "/" + activityName).toLowerCase(Locale.US);
+            String shortActivity = activityName;
+            if (activityName.startsWith(appPackage + ".")) {
+                shortActivity = "." + activityName.substring(appPackage.length() + 1);
+            }
+            String shortened = (appPackage + "/" + shortActivity).toLowerCase(Locale.US);
+            String drawableName = componentToDrawable.get(exact);
+            if (drawableName == null) drawableName = componentToDrawable.get(shortened);
+            if (drawableName == null) return null;
+            Integer cached = drawableResourceCache.get(drawableName);
+            int resId;
+            if (cached != null) {
+                resId = cached.intValue();
+            } else {
+                resId = resources.getIdentifier(drawableName, "drawable", packageName);
+                if (resId == 0) resId = resources.getIdentifier(drawableName, "mipmap", packageName);
+                drawableResourceCache.put(drawableName, Integer.valueOf(resId));
+            }
+            if (resId == 0) return null;
+            try {
+                if (Build.VERSION.SDK_INT >= 21) {
+                    return resources.getDrawable(resId, context.getTheme());
+                }
+                return resources.getDrawable(resId);
+            } catch (Exception ignored) {
+                return null;
+            }
+        }
+    }
+
+    private static class MinimalIconDrawable extends Drawable {
+        private final Paint fillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint strokePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint glowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint fallbackPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
+        private final Drawable sourceIcon;
+        private final String fallbackMark;
+        private final int glyphTintColor;
+        private final int outlineColor;
+        private final int backgroundColor;
+        private final ColorMatrixColorFilter grayscaleFilter;
+        private int alpha = 255;
+
+        MinimalIconDrawable(Drawable sourceIcon, String label, int tintColor, int glyphColor, int outlineColor) {
+            Drawable safeIcon = null;
+            if (sourceIcon != null) {
+                try {
+                    safeIcon = sourceIcon.mutate();
+                } catch (Exception ignored) {
+                    safeIcon = sourceIcon;
+                }
+            }
+            this.sourceIcon = safeIcon;
+            this.fallbackMark = makeFallbackMark(label);
+            this.glyphTintColor = glyphColor;
+            this.outlineColor = outlineColor;
+            this.backgroundColor = blendColors(Color.rgb(12, 12, 16), tintColor, 0.36f);
+
+            fillPaint.setStyle(Paint.Style.FILL);
+            fillPaint.setColor(backgroundColor);
+
+            strokePaint.setStyle(Paint.Style.STROKE);
+            strokePaint.setStrokeWidth(3f);
+            strokePaint.setColor(adjustAlpha(outlineColor, 175));
+
+            glowPaint.setStyle(Paint.Style.STROKE);
+            glowPaint.setStrokeCap(Paint.Cap.ROUND);
+            glowPaint.setColor(adjustAlpha(outlineColor, 120));
+
+            fallbackPaint.setStyle(Paint.Style.STROKE);
+            fallbackPaint.setStrokeCap(Paint.Cap.ROUND);
+            fallbackPaint.setStrokeJoin(Paint.Join.ROUND);
+            fallbackPaint.setColor(glyphColor);
+            fallbackPaint.setTextAlign(Paint.Align.CENTER);
+            fallbackPaint.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+
+            ColorMatrix matrix = new ColorMatrix();
+            matrix.setSaturation(0f);
+            // Keep the original app art recognizable, but pull it toward the launcher text color
+            // so the built-in icon style feels like a real minimal theme instead of an alphabet grid.
+            float r = Color.red(glyphColor) / 255f;
+            float g = Color.green(glyphColor) / 255f;
+            float b = Color.blue(glyphColor) / 255f;
+            ColorMatrix tintMatrix = new ColorMatrix(new float[] {
+                    0.55f + 0.45f * r, 0f, 0f, 0f, 0f,
+                    0f, 0.55f + 0.45f * g, 0f, 0f, 0f,
+                    0f, 0f, 0.55f + 0.45f * b, 0f, 0f,
+                    0f, 0f, 0f, 1f, 0f
+            });
+            matrix.postConcat(tintMatrix);
+            grayscaleFilter = new ColorMatrixColorFilter(matrix);
+        }
+
+        @Override
+        public void draw(Canvas canvas) {
+            android.graphics.Rect b = getBounds();
+            int w = b.width();
+            int h = b.height();
+            int size = Math.min(w, h);
+            if (size <= 0) return;
+            float cx = b.left + w / 2f;
+            float cy = b.top + h / 2f;
+            float pad = size * 0.095f;
+            RectF r = new RectF(cx - size / 2f + pad, cy - size / 2f + pad, cx + size / 2f - pad, cy + size / 2f - pad);
+            float radius = size * 0.235f;
+
+            fillPaint.setAlpha(Math.round(alpha * 0.92f));
+            strokePaint.setAlpha(Math.round(alpha * 0.65f));
+            glowPaint.setAlpha(Math.round(alpha * 0.28f));
+            canvas.drawRoundRect(r, radius, radius, fillPaint);
+            canvas.drawRoundRect(r, radius, radius, strokePaint);
+
+            glowPaint.setStrokeWidth(Math.max(1f, size * 0.018f));
+            float arcInset = size * 0.17f;
+            RectF arc = new RectF(r.left + arcInset, r.top + arcInset, r.right - arcInset, r.bottom - arcInset);
+            canvas.drawArc(arc, -35f, 72f, false, glowPaint);
+            canvas.drawArc(arc, 145f, 72f, false, glowPaint);
+
+            if (sourceIcon != null) {
+                drawThemedSourceIcon(canvas, b, size, cx, cy);
+            } else {
+                drawFallbackGlyph(canvas, size, cx, cy);
+            }
+        }
+
+        private void drawThemedSourceIcon(Canvas canvas, android.graphics.Rect bounds, int size, float cx, float cy) {
+            int iconSize = Math.round(size * 0.66f);
+            int left = Math.round(cx - iconSize / 2f);
+            int top = Math.round(cy - iconSize / 2f);
+            int right = left + iconSize;
+            int bottom = top + iconSize;
+            int save = canvas.saveLayer(bounds.left, bounds.top, bounds.right, bounds.bottom, null);
+            try {
+                sourceIcon.setBounds(left, top, right, bottom);
+                sourceIcon.setAlpha(Math.round(alpha * 0.92f));
+                sourceIcon.setColorFilter(grayscaleFilter);
+                sourceIcon.draw(canvas);
+            } catch (Exception ignored) {
+                drawFallbackGlyph(canvas, size, cx, cy);
+            } finally {
+                try {
+                    sourceIcon.setColorFilter(null);
+                    sourceIcon.setAlpha(255);
+                } catch (Exception ignored) {
+                    // Some drawables are dramatic. Let them be dramatic somewhere else.
+                }
+                canvas.restoreToCount(save);
+            }
+        }
+
+        private void drawFallbackGlyph(Canvas canvas, int size, float cx, float cy) {
+            fallbackPaint.setAlpha(alpha);
+            fallbackPaint.setStrokeWidth(Math.max(2f, size * 0.055f));
+            float s = size * 0.22f;
+            if ("call".equals(fallbackMark)) {
+                canvas.drawArc(new RectF(cx - s, cy - s, cx + s, cy + s), 115f, 150f, false, fallbackPaint);
+                canvas.drawLine(cx - s * 0.85f, cy + s * 0.12f, cx - s * 1.22f, cy + s * 0.48f, fallbackPaint);
+                canvas.drawLine(cx + s * 0.85f, cy - s * 0.12f, cx + s * 1.22f, cy - s * 0.48f, fallbackPaint);
+            } else if ("message".equals(fallbackMark)) {
+                RectF bubble = new RectF(cx - s * 1.3f, cy - s * 0.82f, cx + s * 1.3f, cy + s * 0.72f);
+                canvas.drawRoundRect(bubble, s * 0.28f, s * 0.28f, fallbackPaint);
+                canvas.drawLine(cx - s * 0.45f, cy + s * 0.72f, cx - s * 0.82f, cy + s * 1.08f, fallbackPaint);
+            } else if ("camera".equals(fallbackMark)) {
+                RectF body = new RectF(cx - s * 1.28f, cy - s * 0.68f, cx + s * 1.28f, cy + s * 0.92f);
+                canvas.drawRoundRect(body, s * 0.22f, s * 0.22f, fallbackPaint);
+                canvas.drawCircle(cx, cy + s * 0.12f, s * 0.48f, fallbackPaint);
+                canvas.drawLine(cx - s * 0.55f, cy - s * 0.68f, cx - s * 0.25f, cy - s * 1.0f, fallbackPaint);
+                canvas.drawLine(cx - s * 0.25f, cy - s * 1.0f, cx + s * 0.35f, cy - s * 1.0f, fallbackPaint);
+            } else if ("music".equals(fallbackMark)) {
+                canvas.drawLine(cx + s * 0.45f, cy - s * 1.1f, cx + s * 0.45f, cy + s * 0.45f, fallbackPaint);
+                canvas.drawLine(cx + s * 0.45f, cy - s * 1.1f, cx - s * 0.42f, cy - s * 0.85f, fallbackPaint);
+                canvas.drawCircle(cx - s * 0.38f, cy + s * 0.55f, s * 0.33f, fallbackPaint);
+                canvas.drawCircle(cx + s * 0.45f, cy + s * 0.40f, s * 0.33f, fallbackPaint);
+            } else if ("settings".equals(fallbackMark)) {
+                canvas.drawCircle(cx, cy, s * 0.72f, fallbackPaint);
+                for (int i = 0; i < 8; i++) {
+                    double a = Math.PI * 2.0 * i / 8.0;
+                    float x1 = cx + (float)Math.cos(a) * s * 0.92f;
+                    float y1 = cy + (float)Math.sin(a) * s * 0.92f;
+                    float x2 = cx + (float)Math.cos(a) * s * 1.25f;
+                    float y2 = cy + (float)Math.sin(a) * s * 1.25f;
+                    canvas.drawLine(x1, y1, x2, y2, fallbackPaint);
+                }
+                canvas.drawCircle(cx, cy, s * 0.24f, fallbackPaint);
+            } else {
+                canvas.drawCircle(cx, cy, s * 0.95f, fallbackPaint);
+                canvas.drawLine(cx - s * 0.58f, cy + s * 0.58f, cx + s * 0.58f, cy - s * 0.58f, fallbackPaint);
+            }
+        }
+
+        @Override
+        public void setAlpha(int alpha) {
+            this.alpha = alpha;
+            invalidateSelf();
+        }
+
+        @Override
+        public void setColorFilter(ColorFilter colorFilter) {
+            fillPaint.setColorFilter(colorFilter);
+            strokePaint.setColorFilter(colorFilter);
+            glowPaint.setColorFilter(colorFilter);
+            fallbackPaint.setColorFilter(colorFilter);
+            if (sourceIcon != null) {
+                sourceIcon.setColorFilter(colorFilter);
+            }
+            invalidateSelf();
+        }
+
+        @Override
+        public int getOpacity() {
+            return PixelFormat.TRANSLUCENT;
+        }
+
+        private static String makeFallbackMark(String label) {
+            String text = label == null ? "" : label.toLowerCase(Locale.US);
+            if (text.contains("phone") || text.contains("dial") || text.contains("call")) return "call";
+            if (text.contains("message") || text.contains("sms") || text.contains("mail") || text.contains("chat")) return "message";
+            if (text.contains("camera") || text.contains("photo") || text.contains("gallery")) return "camera";
+            if (text.contains("music") || text.contains("audio") || text.contains("spotify") || text.contains("sound")) return "music";
+            if (text.contains("settings") || text.contains("tools") || text.contains("config")) return "settings";
+            return "generic";
+        }
+
+        private static int adjustAlpha(int color, int alpha) {
+            return Color.argb(alpha, Color.red(color), Color.green(color), Color.blue(color));
+        }
+
+        private static int blendColors(int a, int b, float amount) {
+            float t = Math.max(0f, Math.min(1f, amount));
+            int r = Math.round(Color.red(a) * (1f - t) + Color.red(b) * t);
+            int g = Math.round(Color.green(a) * (1f - t) + Color.green(b) * t);
+            int bl = Math.round(Color.blue(a) * (1f - t) + Color.blue(b) * t);
+            return Color.rgb(r, g, bl);
         }
     }
 
